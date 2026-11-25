@@ -1,9 +1,10 @@
-"""Give new project folders the Ableton project icon (Windows).
+"""Make a new folder a real Live project folder (Windows).
 
-Live marks a project folder with a desktop.ini that points to an icon inside
-the folder. The icon belongs to Ableton, so instead of shipping it the app
-copies the setup from the project folder your Live template lives in (Live
-created that one), and falls back to any .ico in its 'Ableton Project Info'.
+Live treats a folder as a project when it contains 'Ableton Project Info'.
+Without it, 'Save As' in Live creates a second project nested inside. Live
+also gives the folder its icon through a desktop.ini pointing to
+'Ableton Project Info\\AProject.ico'. The icon belongs to Ableton, so the app
+copies it from a project Live made on this PC (the one your template is in).
 """
 from __future__ import annotations
 
@@ -14,68 +15,67 @@ import shutil
 import sys
 
 INFO = "Ableton Project Info"
+ICON = "AProject.ico"
+HIDDEN, SYSTEM, READONLY = 0x2, 0x4, 0x1
+
+DESKTOP_INI = ("[.ShellClassInfo]\r\nConfirmFileOp=0\r\nNoSharing=0\r\n"
+               "IconFile=Ableton Project Info\\AProject.ico\r\nIconIndex=0\r\n")
 
 
 def _set_attrs(path: str, attrs: int) -> None:
     if sys.platform != "win32":
         return
     import ctypes
-    cur = ctypes.windll.kernel32.GetFileAttributesW(path)
-    if cur != -1 and cur != 0xFFFFFFFF:
-        ctypes.windll.kernel32.SetFileAttributesW(path, cur | attrs)
+    k = ctypes.windll.kernel32
+    cur = k.GetFileAttributesW(path)
+    if cur not in (-1, 0xFFFFFFFF):
+        k.SetFileAttributesW(path, cur | attrs)
 
 
-HIDDEN, SYSTEM, READONLY = 0x2, 0x4, 0x1
+def _find_icon(start: str, levels: int = 3) -> str | None:
+    """AProject.ico in a Live project at/above `start` (e.g. the template's)."""
+    d = os.path.abspath(start)
+    for _ in range(levels + 1):
+        for cand in glob.glob(os.path.join(glob.escape(os.path.join(d, INFO)), "*.ico")):
+            return cand
+        ini = os.path.join(d, "desktop.ini")
+        if os.path.isfile(ini):
+            cp = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                with open(ini, encoding="utf-8-sig", errors="ignore") as fh:
+                    cp.read_string(fh.read())
+                sec = cp[".ShellClassInfo"]
+                res = (sec.get("IconFile") or sec.get("IconResource") or "").rsplit(",", 1)[0]
+                p = os.path.join(d, res.replace("\\", os.sep))
+                if res and os.path.isfile(p):
+                    return p
+            except (KeyError, configparser.Error, OSError):
+                pass
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
 
 
-def _icon_from_ini(ini_path: str):
-    cp = configparser.ConfigParser(interpolation=None, strict=False)
-    try:
-        with open(ini_path, encoding="utf-8-sig", errors="ignore") as fh:
-            cp.read_string(fh.read())
-    except (OSError, configparser.Error):
-        return None
-    sec = cp[".ShellClassInfo"] if cp.has_section(".ShellClassInfo") else None
-    if sec is None:
-        return None
-    res = sec.get("IconResource") or sec.get("IconFile")
-    if not res:
-        return None
-    rel = res.rsplit(",", 1)[0].strip()
-    index = res.rsplit(",", 1)[1].strip() if "," in res else sec.get("IconIndex", "0")
-    return rel, index
-
-
-def apply_icon(new_project: str, reference_project: str, log=print) -> bool:
-    """Copy the project-folder icon from reference_project to new_project."""
-    if not reference_project or not os.path.isdir(reference_project):
+def make_live_project(new_project: str, reference: str | None, log=print) -> bool:
+    """Create 'Ableton Project Info' and, when an icon is found, the folder icon.
+    Returns True if the icon was set."""
+    info = os.path.join(new_project, INFO)
+    os.makedirs(info, exist_ok=True)
+    icon = _find_icon(reference) if reference else None
+    if not icon:
         return False
-    rel, index = None, "0"
-    ini = os.path.join(reference_project, "desktop.ini")
-    if os.path.isfile(ini):
-        found = _icon_from_ini(ini)
-        if found:
-            rel, index = found
-    if rel is None:
-        icos = glob.glob(os.path.join(glob.escape(os.path.join(reference_project, INFO)), "*.ico"))
-        if not icos:
-            return False
-        rel = os.path.join(INFO, os.path.basename(icos[0]))
-    rel_fs = rel.replace("\\", os.sep).replace("/", os.sep)
-    rel = rel.replace("/", "\\")                 # desktop.ini uses Windows separators
-    src = rel_fs if os.path.isabs(rel_fs) else os.path.join(reference_project, rel_fs)
-    if not os.path.isfile(src):
-        return False
-    if not os.path.isabs(rel_fs):
-        dst = os.path.join(new_project, rel_fs)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-    new_ini = os.path.join(new_project, "desktop.ini")
-    if os.path.exists(new_ini):
-        return True
-    with open(new_ini, "w", encoding="utf-8") as fh:
-        fh.write(f"[.ShellClassInfo]\nIconResource={rel},{index}\n")
-    _set_attrs(new_ini, HIDDEN | SYSTEM)
-    _set_attrs(new_project, READONLY)     # Explorer only reads desktop.ini on such folders
+    dst = os.path.join(info, ICON)
+    if not os.path.exists(dst):
+        shutil.copy2(icon, dst)
+    ini = os.path.join(new_project, "desktop.ini")
+    if not os.path.exists(ini) and not os.path.exists(os.path.join(new_project, "Desktop.ini")):
+        with open(ini, "w", encoding="utf-8", newline="") as fh:
+            fh.write(DESKTOP_INI)
+        _set_attrs(ini, HIDDEN | SYSTEM)
+    _set_attrs(new_project, READONLY)       # Explorer reads desktop.ini only on such folders
     return True
+
+
+apply_icon = make_live_project              # older name

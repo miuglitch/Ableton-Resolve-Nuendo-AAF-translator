@@ -280,6 +280,14 @@ class AlsBuilder:
             _v(t, "Color", color)
             _v(t, "ColorIndex", color)
         _v(t, "TrackGroupId", -1)
+        # start clean whatever the template track was set to
+        _v(t, "DeviceChain/Mixer/Volume/Manual", 1.0)
+        _v(t, "DeviceChain/Mixer/Pan/Manual", 0.0)
+        _v(t, "DeviceChain/Mixer/Speaker/Manual", True)
+        devs = t.find("DeviceChain/DeviceChain/Devices")
+        if devs is not None:
+            for d in list(devs):
+                devs.remove(d)
 
         events = t.find(".//MainSequencer/Sample/ArrangerAutomation/Events")
         for e in list(events):

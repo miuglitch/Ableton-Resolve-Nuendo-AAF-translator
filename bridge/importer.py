@@ -54,15 +54,25 @@ def _safe(name):
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip() or "Timeline"
 
 
-def project_sidecar(project_dir: str, base_set: str | None = None):
-    """Import settings saved with an earlier import into this project."""
+def project_sidecar(project_dir: str, base_set: str | None = None, levels: int = 3):
+    """Import settings saved with an earlier import into this project.
+    Looks next to the set first, then in the folder and up to `levels`
+    parent folders (Live's 'Save As' can nest a new project inside)."""
     if base_set:
         p = sc.Sidecar.path_for(base_set)
         if os.path.exists(p):
             return sc.Sidecar.load(p)
-    found = sorted(glob.glob(os.path.join(glob.escape(project_dir), "*.bridge.json")),
-                   key=os.path.getmtime, reverse=True)
-    return sc.Sidecar.load(found[0]) if found else None
+    d = os.path.abspath(project_dir)
+    for _ in range(levels + 1):
+        found = sorted(glob.glob(os.path.join(glob.escape(d), "*.bridge.json")),
+                       key=os.path.getmtime, reverse=True)
+        if found:
+            return sc.Sidecar.load(found[0])
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
 
 
 def _unique(path):
@@ -163,10 +173,10 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
 
     b.save(als_path)
     if not opt.existing_project:
-        from .projectfolder import apply_icon
+        from .projectfolder import make_live_project
         try:
-            if not apply_icon(project_dir, os.path.dirname(os.path.abspath(opt.template)), log):
-                log("Project icon: the template's folder has no Ableton project icon to copy.")
+            if not make_live_project(project_dir, os.path.dirname(os.path.abspath(opt.template)), log):
+                log("Project icon: no Ableton project icon found near the template to copy.")
         except OSError as e:
             log(f"Project icon not set: {e}")
 

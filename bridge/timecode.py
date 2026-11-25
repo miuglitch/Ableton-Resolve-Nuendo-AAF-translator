@@ -67,6 +67,8 @@ def fcp_time(t: Fraction, rate: Fraction | None = None) -> str:
     """Write FCPXML rational time. If a frame rate is given and the value
     lands on a frame, write it in frame units (what Resolve expects)."""
     t = Fraction(t)
+    if t == 0:
+        return "0s"
     if rate:
         frames = t * rate
         if frames.denominator == 1:

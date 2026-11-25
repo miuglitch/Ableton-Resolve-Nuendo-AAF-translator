@@ -65,11 +65,16 @@ class Sidecar:
         return self.link_for(wav_path) is not None
 
     def link_for(self, wav_path: str):
-        key = os.path.normcase(os.path.abspath(wav_path))
+        """Find the import record for a WAV Live plays. Falls back to the file
+        name, so it still works after the project folder was moved."""
+        norm = lambda p: os.path.normcase(os.path.normpath(p.replace("\\", "/")))  # noqa: E731
+        key = norm(os.path.abspath(wav_path))
         for m in self.media:
-            if os.path.normcase(os.path.abspath(m.wav)) == key:
+            if norm(os.path.abspath(m.wav)) == key:
                 return m
-        return None
+        base = os.path.basename(wav_path.replace("\\", "/")).lower()
+        hits = [m for m in self.media if os.path.basename(m.wav.replace("\\", "/")).lower() == base]
+        return hits[0] if len(hits) == 1 else None
 
     def save(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:

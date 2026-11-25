@@ -6,7 +6,8 @@ Round-trips timelines between **DaVinci Resolve** (hub), **Ableton Live 12/13**
 | Direction | Status |
 |---|---|
 | Resolve / Nuendo → Live (AAF, FCPXML) | **v0.1: built, needs testing in Live** |
-| Live → Resolve (FCPXML, AAF) | next |
+| Live → Resolve (FCPXML) | v0.5: built |
+| Live → Resolve/Nuendo (AAF) | next |
 | Live → Nuendo (AAF) | next |
 
 ## Getting the app
@@ -84,6 +85,21 @@ Notes
 - Sources with more than 2 channels: the channels the clip uses are kept; if a
   clip uses more than 2, the first two are kept and the report says so.
 - Compound / multicam clips: decompose/flatten them in Resolve before export.
+
+## Export: Live → Resolve
+
+1. Drop the Live Set (.als) on the *Live → Resolve / Nuendo* tab. Your own
+   increments work too (e.g. `Timeline 1 02.als`); the import info is found in
+   the folders above if it isn't next to the set.
+2. Check the track list and the *Before exporting* notes (plug-ins, MIDI and
+   sends aren't carried; freeze and flatten those tracks first).
+3. **Export to Resolve.** Then in Resolve: File → Import → Timeline… → the .fcpxml.
+
+What comes back: clips on the original timecode, trims, clip gain (+ track fader
+level, optional), fades, track volume automation as clip keyframes, locators as
+markers. Clips still using Resolve's audio point back to Resolve's own media;
+new sound design is copied into `<Name> Media` next to the export and goes on
+its own `SD - ` tracks.
 
 ## Command line
 

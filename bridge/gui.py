@@ -21,7 +21,7 @@ try:
 except Exception:          # app still works without drag and drop
     HAS_DND = False
 
-from . import __version__, importer, video
+from . import __version__, exporter, importer, video
 from .media import SAMPLE_RATES
 from .scrolling import ScrollManager
 from .timecode import seconds_to_tc
@@ -208,8 +208,7 @@ class App(Base):
 
         self.scroll = ScrollManager(self)
         self._build_import(tabs.tab("Resolve / Nuendo → Live"))
-        exp = tabs.tab("Live → Resolve / Nuendo")
-        label(exp, "Export is the next build step.", size=13).pack(anchor="w", padx=8, pady=8)
+        self._build_export(tabs.tab("Live → Resolve / Nuendo"))
         self._build_video(tabs.tab("Picture transcode"))
 
         self.scroll.install()
@@ -257,6 +256,13 @@ class App(Base):
                          "picture" if ext in VIDEO_EXT else None)
         if self.tabs.get() == "Picture transcode" and not force:
             kind = {"picture": "vin", "folder": "vout"}.get(kind, kind)
+        if self.tabs.get() == "Live → Resolve / Nuendo" and not force:
+            kind = {"template": "xset", "folder": "xout"}.get(kind, kind)
+        if kind == "xset":
+            return self._load_set(path)
+        if kind == "xout":
+            self.vx_next.set(False)
+            return self.vx_out.set(path if os.path.isdir(path) else os.path.dirname(path))
         if kind == "timeline":
             self._load_timeline(path)
         elif kind == "template":
@@ -670,6 +676,214 @@ class App(Base):
                     self.tl = importer.load(path)     # fresh copy for another run
                 except Exception:
                     pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- export tab -----------------------------------------------------------------
+    def _build_export(self, tab):
+        page = ctk.CTkScrollableFrame(tab, fg_color=BG, scrollbar_button_color=LINE,
+                                      scrollbar_button_hover_color=DIM)
+        page.pack(fill="both", expand=True)
+        self.scroll.register(page)
+        page.columnconfigure(0, weight=1)
+        s = self.settings
+        self.vx_set = tk.StringVar()
+        self.vx_out = tk.StringVar(value=s.get("export_out", ""))
+        self.vx_custom = s.get("export_out", "")
+        self.vx_next = tk.BooleanVar(value=s.get("export_neighbour", True))
+        self.vx_name = tk.StringVar()
+        self.vx_fader = tk.BooleanVar(value=s.get("export_fader", True))
+        self.vx_muted = tk.BooleanVar(value=s.get("export_muted", False))
+        self.vx_split = tk.BooleanVar(value=s.get("export_split", True))
+        self.vx_prefix = tk.StringVar(value=s.get("export_prefix", exporter.SD_PREFIX))
+        self.vx_tc = tk.StringVar(value="01:00:00:00")
+        self.vx_rate = tk.StringVar(value="25")
+        self.xpre = None
+        self.xtrack_vars = []
+
+        files = Card(page, "Files")
+        files.grid(row=0, column=0, sticky="ew", pady=(4, 10))
+        self._file_row(files, 1, "Live Set (.als)", self.vx_set,
+                       lambda: self._load_set(filedialog.askopenfilename(filetypes=[("Live Set", "*.als")])),
+                       "xset")
+        self.xout_entry = self._file_row(files, 2, "Save export in", self.vx_out,
+                                         lambda: self.vx_out.set(filedialog.askdirectory() or self.vx_out.get()),
+                                         "xout")
+        check(files, "Neighbour folder: 'Export to Resolve' next to the set's folder", self.vx_next).grid(
+            row=3, column=1, sticky="w", pady=(2, 2))
+        self.vx_next.trace_add("write", lambda *a: self._x_toggle())
+        self.x_preview = ctk.CTkLabel(files, text="", font=f(11), text_color=DIM, anchor="w",
+                                      justify="left", wraplength=700)
+        self.x_preview.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 10))
+        for v in (self.vx_out, self.vx_name):
+            v.trace_add("write", lambda *a: self._x_preview())
+
+        opts = Card(page, "Export")
+        opts.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        g = ctk.CTkFrame(opts, fg_color="transparent")
+        g.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 6))
+        label(g, "Format").grid(row=0, column=0, sticky="w")
+        label(g, "FCPXML for DaVinci Resolve  (AAF for Nuendo is next)", dim=False).grid(
+            row=1, column=0, sticky="w", padx=(0, 20))
+        label(g, "Timeline name").grid(row=0, column=1, sticky="w")
+        entry(g, self.vx_name, 240).grid(row=1, column=1, sticky="w", padx=(0, 14))
+        label(g, "New sound design prefix").grid(row=0, column=2, sticky="w")
+        entry(g, self.vx_prefix, 90).grid(row=1, column=2, sticky="w")
+        row = ctk.CTkFrame(opts, fg_color="transparent")
+        row.grid(row=2, column=0, columnspan=4, sticky="w", padx=14, pady=(6, 6))
+        check(row, "Include track fader level", self.vx_fader).pack(side="left", padx=(0, 18))
+        check(row, "Separate tracks for new sound design", self.vx_split).pack(side="left")
+        self.x_fallback = ctk.CTkFrame(opts, fg_color="transparent")
+        label(self.x_fallback, "This set has no import info. Timeline start").pack(side="left")
+        entry(self.x_fallback, self.vx_tc, 110).pack(side="left", padx=6)
+        label(self.x_fallback, "Frame rate").pack(side="left", padx=(8, 0))
+        combo(self.x_fallback, self.vx_rate, ["23.976", "24", "25", "29.97", "30", "50", "59.94", "60"],
+              100).pack(side="left", padx=6)
+        self.x_info = label(opts, "Load or drop a Live Set.")
+        self.x_info.grid(row=4, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 12))
+
+        tr = Card(page, "Tracks to export")
+        tr.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        bar = ctk.CTkFrame(tr, fg_color="transparent")
+        bar.grid(row=1, column=0, columnspan=4, sticky="w", padx=14)
+        button(bar, "Select all", lambda: [v.set(True) for _, v in self.xtrack_vars]).pack(side="left", padx=(0, 6))
+        button(bar, "Select none", lambda: [v.set(False) for _, v in self.xtrack_vars]).pack(side="left")
+        self.xlist = ctk.CTkScrollableFrame(tr, fg_color=FIELD, height=40, corner_radius=6,
+                                            scrollbar_button_color=LINE)
+        self.xlist.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=(8, 10))
+        self.scroll.register(self.xlist)
+        label(self.xlist, "No Live Set loaded.").pack(anchor="w", padx=6, pady=6)
+
+        self.xwarn = Card(page, "Before exporting")
+        self.xwarn_text = ctk.CTkLabel(self.xwarn, text="", font=f(12), text_color=TEXT, anchor="w",
+                                       justify="left", wraplength=780)
+        self.xwarn_text.grid(row=1, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 12))
+
+        run = ctk.CTkFrame(page, fg_color="transparent")
+        run.grid(row=4, column=0, sticky="ew", pady=(4, 6))
+        self.xgo = button(run, "Export to Resolve", self._run_export, primary=True, width=200)
+        self.xgo.grid(row=0, column=0, sticky="w")
+        self.xlog = ctk.CTkTextbox(page, height=150, fg_color=PANEL, text_color=TEXT, border_width=1,
+                                   border_color=LINE, font=ctk.CTkFont("Consolas", 12), corner_radius=8)
+        self.xlog.grid(row=5, column=0, sticky="ew", pady=(6, 4))
+        self._x_toggle()
+
+    def _xsay(self, m):
+        self.xlog.insert("end", m + "\n")
+        self.xlog.see("end")
+
+    def _x_neighbour(self):
+        p = self.vx_set.get()
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(p))), "Export to Resolve") if p else ""
+
+    def _x_toggle(self):
+        if self.vx_next.get():
+            if self.vx_out.get() and self.vx_out.get() != self._x_neighbour():
+                self.vx_custom = self.vx_out.get()
+            self.vx_out.set(self._x_neighbour())
+            self.xout_entry.configure(state="disabled", text_color=DIM)
+        else:
+            self.xout_entry.configure(state="normal", text_color=TEXT)
+            if self.vx_out.get() == self._x_neighbour():
+                self.vx_out.set(self.vx_custom)
+        self._x_preview()
+
+    def _x_preview(self):
+        if not self.vx_out.get():
+            return self.x_preview.configure(text="Load a Live Set, or untick and choose a folder.")
+        name = exporter._safe(self.vx_name.get() or "Timeline")
+        self.x_preview.configure(text=f"Creates  {os.path.normpath(os.path.join(self.vx_out.get(), name))}"
+                                      f" <date time>.fcpxml  +  '{name} Media' folder for new sound design")
+
+    def _load_set(self, p):
+        if not p:
+            return
+        self.vx_set.set(p)
+        try:
+            pre = exporter.preflight(p)
+        except Exception as e:
+            return self._xsay(f"! Can't read Live Set: {e}")
+        self.xpre = pre
+        self.vx_name.set(os.path.splitext(os.path.basename(p))[0])
+        if self.vx_next.get():
+            self.vx_out.set(self._x_neighbour())
+        side = pre.side
+        if side:
+            self.x_fallback.grid_forget()
+            self.x_info.configure(
+                text=f"{pre.live.tempo:g} BPM  ·  {float(side.rate):.3f} fps  ·  Live 0:00 = "
+                     f"{seconds_to_tc(side.offset_s, side.rate, side.drop_frame)}  ·  from '{side.timeline_name}'",
+                text_color=TEXT)
+        else:
+            self.x_fallback.grid(row=3, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 6))
+            self.x_info.configure(text=f"{pre.live.tempo:g} BPM", text_color=TEXT)
+        for w in self.xlist.winfo_children():
+            w.destroy()
+        self.xtrack_vars = []
+        for lt in exporter.export_tracks(pre):
+            n_orig = sum(1 for c in lt.track.clips if side and side.link_for(c.source_path))
+            n_sd = len(lt.track.clips) - n_orig
+            parts = [f"{n_orig} original"] if n_orig else []
+            parts += [f"{n_sd} new"] if n_sd else []
+            flags = ("  ·  plug-ins" if lt.has_devices else "") + ("  ·  muted" if lt.muted else "")
+            v = tk.BooleanVar(value=not lt.muted)
+            check(self.xlist, f"{lt.track.name}    {', '.join(parts)}{flags}", v).pack(anchor="w", padx=6, pady=3)
+            self.xtrack_vars.append((lt.track.name, v))
+        self.after(30, lambda: self._fit_any(self.xlist))
+        if pre.warnings:
+            self.xwarn_text.configure(text="\n".join("•  " + w for w in pre.warnings))
+            self.xwarn.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        else:
+            self.xwarn.grid_forget()
+        self._xsay(f"Loaded {os.path.basename(p)}: {len(self.xtrack_vars)} tracks with audio")
+
+    def _fit_any(self, lst):
+        self.update_idletasks()
+        rows = [w for w in lst.winfo_children() if w.winfo_manager() == "pack"]
+        if not rows:
+            return
+        row_h = max(r.winfo_reqheight() for r in rows) + 6
+        h = min(len(rows), self.MAX_ROWS) * row_h + 6
+        lst.configure(height=h)
+        self.update_idletasks()
+        if len(rows) > self.MAX_ROWS:
+            lst._scrollbar.grid()
+        else:
+            lst._scrollbar.grid_remove()
+
+    def _run_export(self):
+        p = self.vx_set.get()
+        if not self.xpre or not os.path.isfile(p):
+            return self._xsay("! Load or drop a Live Set (.als) first.")
+        sel = [n for n, v in self.xtrack_vars if v.get()]
+        if not sel:
+            return self._xsay("! Tick at least one track.")
+        if not self.vx_out.get():
+            return self._xsay("! Choose where to save the export.")
+        s = self.settings
+        if not self.vx_next.get():
+            s["export_out"] = self.vx_out.get()
+        s.update(export_neighbour=self.vx_next.get(), export_fader=self.vx_fader.get(),
+                 export_muted=self.vx_muted.get(), export_split=self.vx_split.get(),
+                 export_prefix=self.vx_prefix.get())
+        save_settings(s)
+        opt = exporter.ExportOptions(
+            out_dir=self.vx_out.get(), selected=sel, name=self.vx_name.get(),
+            sd_prefix=self.vx_prefix.get(), split_mixed=self.vx_split.get(),
+            include_muted=True, include_fader=self.vx_fader.get(),
+            offset_tc=self.vx_tc.get(), frame_rate=self.vx_rate.get(),
+            log=lambda m: self.after(0, self._xsay, m))
+        self.xgo.configure(state="disabled", text="Working…")
+
+        def work():
+            try:
+                res = exporter.run(p, opt, exporter.preflight(p))
+                self.after(0, self._xsay, f"✓ Exported: {res.path}")
+                self.after(0, self._xsay, "  In Resolve: File → Import → Timeline… and pick this file.")
+            except Exception as e:
+                self.after(0, self._xsay, f"✗ Export failed: {e}")
+            finally:
+                self.after(0, lambda: self.xgo.configure(state="normal", text="Export to Resolve"))
 
         threading.Thread(target=work, daemon=True).start()
 

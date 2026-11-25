@@ -254,6 +254,91 @@ def test_project_icon_copied(env, tmp_path):
     res = importer.run(env["fcp"], importer.ImportOptions(
         template=str(tpl), out_dir=str(tmp_path / "out"), selected=["A1"]))
     proj = os.path.dirname(res.als_path)
-    assert (open(os.path.join(proj, "desktop.ini")).read().strip().endswith("AProject.ico,0"))
+    ini = open(os.path.join(proj, "desktop.ini")).read()
+    assert "IconFile=Ableton Project Info\\AProject.ico" in ini and "IconIndex=0" in ini
     assert os.path.exists(os.path.join(proj, "Ableton Project Info\\AProject.ico")) or \
         os.path.exists(os.path.join(proj, "Ableton Project Info", "AProject.ico"))
+
+
+def test_roundtrip_export(env, tmp_path):
+    """Resolve FCPXML → Live → (add sound design + automation in 'Live') → FCPXML."""
+    import copy, shutil
+    from bridge import exporter
+    from bridge.readers.fcpxml import read as read_fcp
+    from bridge.als.writer import load_als, save_als
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path), selected=["A1", "A3"], tempo=120.0))
+    # --- "work in Live": Save As into a nested project, add an SD clip + volume automation
+    nested = os.path.join(os.path.dirname(res.als_path), "Spot 02 Project")
+    os.makedirs(nested)
+    sfx = tmp_path / "lib" / "Boom.wav"
+    sfx.parent.mkdir()
+    fx.ff("-f", "lavfi", "-i", "sine=f=60:d=3", "-ar", "48000", str(sfx))
+    tree = load_als(res.als_path)
+    root = tree.getroot()
+    tracks = root.findall("LiveSet/Tracks/AudioTrack")
+    a1 = tracks[0]
+    events = a1.find(".//ArrangerAutomation/Events")
+    clip = copy.deepcopy(events[0])
+    clip.set("Time", "4")                                 # 2 s at 120 BPM
+    clip.find("CurrentStart").set("Value", "4")
+    clip.find("CurrentEnd").set("Value", "6")             # 1 s long
+    clip.find("Loop/LoopStart").set("Value", "0.5")
+    clip.find("SampleRef/FileRef/Path").set("Value", str(sfx))
+    clip.find("SampleVolume").set("Value", "0.5")
+    events.append(clip)
+    vol_id = a1.find(".//Mixer/Volume/AutomationTarget").get("Id")
+    envs = a1.find("AutomationEnvelopes/Envelopes")
+    envs.append(etree.fromstring(
+        f'<AutomationEnvelope Id="9"><EnvelopeTarget><PointeeId Value="{vol_id}"/></EnvelopeTarget>'
+        '<Automation><Events><FloatEvent Id="0" Time="-63072000" Value="1"/>'
+        '<FloatEvent Id="1" Time="4" Value="1"/><FloatEvent Id="2" Time="6" Value="0.5"/>'
+        '</Events></Automation></AutomationEnvelope>'))
+    als2 = os.path.join(nested, "Spot 02.als")
+    save_als(tree, als2)
+
+    pre = exporter.preflight(als2)
+    assert pre.side is not None                           # found in the parent folder
+    out = exporter.run(als2, exporter.ExportOptions(out_dir=str(tmp_path / "exp"), log=lambda m: None), pre)
+    tl = read_fcp(out.path)
+    assert tl.start == frames(86400)
+    names = [t.name for t in tl.audio_tracks]
+    assert names == ["A1", "A2", "A3"], names              # ORIG - A1, SD - A1, ORIG - A3 lanes
+    orig = tl.audio_tracks[0].clips[0]
+    assert orig.start == frames(86400) and orig.source_in == frames(24)
+    assert orig.source_path.endswith("A001_C003 cam.mov") and orig.channels == [1, 2]
+    # the volume ride over this clip becomes keyframes, clip gain (-3 dB) included
+    assert orig.volume[0].db == pytest.approx(-3.0, abs=0.01)
+    assert orig.volume[-1].db == pytest.approx(-3.0 - 6.0206, abs=0.01)
+    boom = tl.audio_tracks[1].clips[0]
+    assert boom.start == frames(86400) + 2 and boom.duration == 1
+    assert boom.source_in == Fraction(1, 2)
+    assert "Spot 02 Media" in boom.source_path and os.path.exists(boom.source_path)
+    assert [round(p.db, 2) for p in boom.volume] == [round(-6.0206, 2), round(-12.0412, 2)]
+    w = tl.audio_tracks[2].clips[0]
+    assert w.start == frames(86640 + 24)
+    assert tl.markers and tl.markers[0].name == "Door slam" and tl.markers[0].time == frames(86424)
+    # export XML names the tracks
+    raw = open(out.path, encoding="utf-8").read()
+    assert 'lane="-2"' in raw
+
+
+def test_moved_project_still_maps_orig(env, tmp_path):
+    import shutil
+    from bridge import exporter
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path / "a"), selected=["A3"]))
+    moved = tmp_path / "moved"
+    shutil.move(os.path.dirname(res.als_path), moved)
+    als = moved / os.path.basename(res.als_path)
+    # the set still has the old absolute paths; Live finds files via relative paths
+    root = _als(str(als))
+    for fr in root.iter("FileRef"):
+        p = fr.find("Path").get("Value")
+        fr.find("RelativePath").set("Value", "Samples/Imported/" + os.path.basename(p))
+        fr.find("RelativePathType").set("Value", "1")
+    from bridge.als.writer import save_als
+    save_als(etree.ElementTree(root), str(als))
+    out = exporter.run(str(als), exporter.ExportOptions(out_dir=str(tmp_path / "e"), log=lambda m: None))
+    raw = open(out.path, encoding="utf-8").read()
+    assert "Whoosh.mxf" in raw and "Media" not in os.listdir(tmp_path / "e")
