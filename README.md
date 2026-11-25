@@ -95,9 +95,13 @@ Notes
    sends aren't carried; freeze and flatten those tracks first).
 3. **Export to Resolve.** Then in Resolve: File → Import → Timeline… → the .fcpxml.
 
-What comes back: clips on the original timecode, trims, clip gain (+ track fader
-level, optional), fades, track volume automation as clip keyframes, locators as
-markers. Clips still using Resolve's audio point back to Resolve's own media;
+Resolve always imports a timeline as a **new timeline**: a complete one, to check
+next to the original. What comes back: Resolve's video edit (V1, V2…; or the picture
+reference for projects imported before v0.6), original audio tracks you didn't bring
+into Live, clips on the original timecode, trims, clip gain, fades, track volume
+automation as clip keyframes (measured from the fader position), locators as
+markers. The static fader level is left out unless "Add track fader level to clip
+gain" is ticked. Clips still using Resolve's audio point back to Resolve's own media;
 new sound design is copied into `<Name> Media` next to the export and goes on
 its own `SD - ` tracks.
 

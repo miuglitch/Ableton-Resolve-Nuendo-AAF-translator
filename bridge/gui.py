@@ -701,7 +701,9 @@ class App(Base):
         self.vx_custom = s.get("export_out", "")
         self.vx_next = tk.BooleanVar(value=s.get("export_neighbour", True))
         self.vx_name = tk.StringVar()
-        self.vx_fader = tk.BooleanVar(value=s.get("export_fader", True))
+        self.vx_fader = tk.BooleanVar(value=s.get("export_include_fader", False))
+        self.vx_video = tk.BooleanVar(value=s.get("export_video", True))
+        self.vx_extra = tk.BooleanVar(value=s.get("export_unimported", True))
         self.vx_muted = tk.BooleanVar(value=s.get("export_muted", False))
         self.vx_split = tk.BooleanVar(value=s.get("export_split", True))
         self.vx_prefix = tk.StringVar(value=s.get("export_prefix", exporter.SD_PREFIX))
@@ -740,8 +742,12 @@ class App(Base):
         entry(g, self.vx_prefix, 90).grid(row=1, column=2, sticky="w")
         row = ctk.CTkFrame(opts, fg_color="transparent")
         row.grid(row=2, column=0, columnspan=4, sticky="w", padx=14, pady=(6, 6))
-        check(row, "Include track fader level", self.vx_fader).pack(side="left", padx=(0, 18))
+        check(row, "Add track fader level to clip gain", self.vx_fader).pack(side="left", padx=(0, 18))
         check(row, "Separate tracks for new sound design", self.vx_split).pack(side="left")
+        row2 = ctk.CTkFrame(opts, fg_color="transparent")
+        row2.grid(row=4, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 8))
+        check(row2, "Video tracks", self.vx_video).pack(side="left", padx=(0, 18))
+        check(row2, "Resolve audio tracks that weren't brought into Live", self.vx_extra).pack(side="left")
         self.x_fallback = ctk.CTkFrame(opts, fg_color="transparent")
         label(self.x_fallback, "This set has no import info. Timeline start").pack(side="left")
         entry(self.x_fallback, self.vx_tc, 110).pack(side="left", padx=6)
@@ -749,7 +755,7 @@ class App(Base):
         combo(self.x_fallback, self.vx_rate, ["23.976", "24", "25", "29.97", "30", "50", "59.94", "60"],
               100).pack(side="left", padx=6)
         self.x_info = label(opts, "Load or drop a Live Set.")
-        self.x_info.grid(row=4, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 12))
+        self.x_info.grid(row=6, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 12))
 
         tr = Card(page, "Tracks to export")
         tr.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -878,7 +884,8 @@ class App(Base):
         s = self.settings
         if not self.vx_next.get():
             s["export_out"] = self.vx_out.get()
-        s.update(export_neighbour=self.vx_next.get(), export_fader=self.vx_fader.get(),
+        s.update(export_neighbour=self.vx_next.get(), export_include_fader=self.vx_fader.get(),
+                 export_video=self.vx_video.get(), export_unimported=self.vx_extra.get(),
                  export_muted=self.vx_muted.get(), export_split=self.vx_split.get(),
                  export_prefix=self.vx_prefix.get())
         save_settings(s)
@@ -886,6 +893,7 @@ class App(Base):
             out_dir=self.vx_out.get(), selected=sel, name=self.vx_name.get(),
             sd_prefix=self.vx_prefix.get(), split_mixed=self.vx_split.get(),
             include_muted=True, include_fader=self.vx_fader.get(),
+            include_video=self.vx_video.get(), include_unimported=self.vx_extra.get(),
             offset_tc=self.vx_tc.get(), frame_rate=self.vx_rate.get(),
             log=lambda m: self.after(0, self._xsay, m))
         self.xgo.configure(state="disabled", text="Working…")

@@ -46,6 +46,10 @@ class Sidecar:
     sample_rate: int = 48000             # Resolve timeline rate
     media_sample_rate: int = 48000       # rate the WAVs were converted to (Live session rate)
     media: list[MediaLink] = field(default_factory=list)
+    # Resolve's edit as it was at import, so the export can rebuild a complete
+    # timeline: video tracks, and audio tracks that weren't brought into Live.
+    video: list[dict] = field(default_factory=list)        # {"track": "V1", "clips": [clip dicts]}
+    extra_audio: list[dict] = field(default_factory=list)  # {"track": "A5", "clips": [...]}
     version: int = VERSION
 
     # convenience accessors
@@ -85,12 +89,33 @@ class Sidecar:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh)
         media = [MediaLink(**m) for m in d.pop("media", [])]
-        return cls(media=media, **d)
+        known = set(cls.__dataclass_fields__)
+        return cls(media=media, **{k: v for k, v in d.items() if k in known})
 
     @staticmethod
     def path_for(als_path: str) -> str:
         base, _ = os.path.splitext(als_path)
         return base + ".bridge.json"
+
+
+def clip_to_dict(c) -> dict:
+    return {"name": c.name, "start": _f(c.start), "duration": _f(c.duration),
+            "source": c.source_path, "source_in": _f(c.source_in), "channels": list(c.channels),
+            "gain_db": c.gain_db, "fade_in": _f(c.fade_in), "fade_out": _f(c.fade_out),
+            "enabled": c.enabled}
+
+
+def clip_from_dict(d):
+    from .model import Clip
+    return Clip(name=d.get("name", ""), start=_p(d["start"]), duration=_p(d["duration"]),
+                source_path=d["source"], source_in=_p(d["source_in"]),
+                channels=list(d.get("channels", [])), gain_db=d.get("gain_db", 0.0),
+                fade_in=_p(d.get("fade_in", "0/1")), fade_out=_p(d.get("fade_out", "0/1")),
+                enabled=d.get("enabled", True))
+
+
+def tracks_to_list(tracks) -> list[dict]:
+    return [{"track": t.name, "clips": [clip_to_dict(c) for c in t.clips]} for t in tracks if t.clips]
 
 
 def make(timeline, offset: Fraction, tempo: float) -> Sidecar:

@@ -182,6 +182,13 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
 
     side = sc.make(tl, offset, opt.tempo)
     side.media_sample_rate = opt.sample_rate
+    from .readers.aaf import EMBEDDED
+    side.video = sc.tracks_to_list([t for t in tl.tracks if t.kind == "video"])
+    side.extra_audio = sc.tracks_to_list(
+        [t for t in tl.audio_tracks if not t.selected
+         and not any(c.source_path.startswith(EMBEDDED) for c in t.clips)])
+    if earlier and not side.video:
+        side.video = earlier.video
     if earlier:                                   # keep track of earlier imports' originals
         side.media = list(earlier.media)
     known = {os.path.normcase(m.wav) for m in side.media}

@@ -34,7 +34,9 @@ class ExportOptions:
     sd_prefix: str = SD_PREFIX
     split_mixed: bool = True               # ORIG and SD on the same Live track -> two tracks
     include_muted: bool = False            # muted tracks exported as disabled clips
-    include_fader: bool = True             # track fader level is added to clip gain
+    include_fader: bool = False            # add the static track fader level to clip gain
+    include_video: bool = True             # rebuild Resolve's video tracks (or the picture reference)
+    include_unimported: bool = True        # Resolve audio tracks that weren't brought into Live
     # only needed when the set has no .bridge.json (not made by this app)
     offset_tc: str = "01:00:00:00"
     frame_rate: str = "25"
@@ -218,10 +220,14 @@ def run(als_path: str, opt: ExportOptions, pre: Preflight | None = None) -> Expo
                        source_path="", source_in=c.source_in, fade_in=c.fade_in, fade_out=c.fade_out,
                        enabled=c.enabled and not lt.muted)
             out.volume = als_reader.volume_points(lt, c)
+            # fader off: automation is measured from where the fader sits
+            base = 0.0 if opt.include_fader else lt.fader_db
             if out.volume:
+                for p in out.volume:
+                    p.db -= base
                 out.gain_db = c.gain_db
             else:
-                out.gain_db = c.gain_db + (als_reader.static_level_db(lt, c) if opt.include_fader or lt.volume_auto else 0.0)
+                out.gain_db = c.gain_db + als_reader.static_level_db(lt, c) - base
             if link and not link.source.startswith(EMBEDDED) and os.path.exists(link.source):
                 out.source_path = media.asset(link.source, copy=False)
                 out.channels = list(link.channels)
@@ -240,9 +246,54 @@ def run(als_path: str, opt: ExportOptions, pre: Preflight | None = None) -> Expo
         n_orig += len(orig)
         n_sd += len(sd)
 
+    # original Resolve audio tracks that were left out of the Live session
+    n_extra = 0
+    if opt.include_unimported and side:
+        from .sidecar import clip_from_dict
+        for t in side.extra_audio:
+            clips = []
+            for d in t["clips"]:
+                c = clip_from_dict(d)
+                if os.path.exists(c.source_path):
+                    c.source_path = media.asset(c.source_path, copy=False)
+                    clips.append(c)
+            if clips:
+                out_tracks.append(OutTrack(t["track"], clips))
+                n_extra += 1
+
+    # video: Resolve's edit from the import, else the picture reference in Live
+    video_tracks: list[OutTrack] = []
+    if opt.include_video:
+        from .sidecar import clip_from_dict
+        for t in (side.video if side else []):
+            clips = []
+            for d in t["clips"]:
+                c = clip_from_dict(d)
+                if os.path.exists(c.source_path):
+                    c.source_path = media.asset(c.source_path, copy=False)
+                    clips.append(c)
+                else:
+                    warnings.append(f"Video file not found: {c.source_path}")
+            if clips:
+                video_tracks.append(OutTrack(t["track"], clips))
+        if not video_tracks:
+            for lt in live.tracks:
+                if lt.kind == "picture":
+                    clips = []
+                    for c in lt.track.clips:
+                        if os.path.exists(c.source_path):
+                            clips.append(Clip(name=c.name, start=c.start + offset, duration=c.duration,
+                                              source_path=media.asset(c.source_path, copy=False),
+                                              source_in=c.source_in))
+                    if clips:
+                        video_tracks.append(OutTrack("V1", clips))
+                        warnings.append("No video edit saved with this project, so the picture reference "
+                                        "was put on V1. Import again with v0.6+ to get Resolve's own video clips.")
+                    break
+
     markers = [Marker(time=m.time + offset, name=m.name) for m in live.locators]
     fcpxml_writer.write(out_path, name, rate, drop, tc_start, out_tracks, media.assets, markers,
-                        sample_rate=side.sample_rate if side else 48000)
+                        sample_rate=side.sample_rate if side else 48000, video=video_tracks)
 
     report = os.path.splitext(out_path)[0] + " - export report.txt"
     with open(report, "w", encoding="utf-8") as fh:
@@ -254,6 +305,7 @@ def run(als_path: str, opt: ExportOptions, pre: Preflight | None = None) -> Expo
         fh.write(f"\nOriginal Resolve media clips: {n_orig}\nNew sound design clips: {n_sd} "
                  f"({len(media.copied)} files copied to '{os.path.basename(media.dir)}')\n")
         fh.write(f"Locators → markers: {len(markers)}\n")
+        fh.write(f"Video tracks: {len(video_tracks)}; original audio tracks not used in Live: {n_extra}\n")
         if warnings:
             fh.write("\nWarnings:\n" + "\n".join(f"- {w}" for w in warnings) + "\n")
     log(f"Done: {out_path}")

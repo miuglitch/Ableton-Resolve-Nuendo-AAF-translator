@@ -55,6 +55,8 @@ def test_fcpxml_read(env):
     assert c.fade_in == frames(12) and c.fade_out == frames(24)
     w = tl.audio_tracks[2].clips[0]
     assert w.start == frames(86640 + 24)
+    # A3 carries automation (from Resolve's keyframes), so its fader setting doesn't apply
+    assert [round(p.db) for p in w.volume][:1] == [-12]
     assert [p.db for p in w.volume] == [-12.0, 0.0]
     assert w.volume[0].time == 0
     assert tl.markers[0].time == frames(86424) and tl.markers[0].name == "Door slam"
@@ -294,6 +296,7 @@ def test_roundtrip_export(env, tmp_path):
         '<Automation><Events><FloatEvent Id="0" Time="-63072000" Value="1"/>'
         '<FloatEvent Id="1" Time="4" Value="1"/><FloatEvent Id="2" Time="6" Value="0.5"/>'
         '</Events></Automation></AutomationEnvelope>'))
+    tracks[1].find(".//Mixer/Volume/Manual").set("Value", "0.0794328")   # A3 fader at -22 dB
     als2 = os.path.join(nested, "Spot 02.als")
     save_als(tree, als2)
 
@@ -303,7 +306,13 @@ def test_roundtrip_export(env, tmp_path):
     tl = read_fcp(out.path)
     assert tl.start == frames(86400)
     names = [t.name for t in tl.audio_tracks]
-    assert names == ["A1", "A2", "A3"], names              # ORIG - A1, SD - A1, ORIG - A3 lanes
+    # ORIG - A1, SD - A1, ORIG - A3, + Resolve's A2 that wasn't brought into Live
+    assert names == ["A1", "A2", "A3", "A4"], names
+    assert tl.audio_tracks[3].clips[0].channels == [3]
+    # Resolve's video edit comes back on V1 (video only, its audio not doubled)
+    v = [t for t in tl.tracks if t.kind == "video"]
+    assert v and v[0].clips[0].start == frames(86400) and v[0].clips[0].duration == frames(240)
+    assert v[0].clips[0].source_path.endswith("A001_C003 cam.mov")
     orig = tl.audio_tracks[0].clips[0]
     assert orig.start == frames(86400) and orig.source_in == frames(24)
     assert orig.source_path.endswith("A001_C003 cam.mov") and orig.channels == [1, 2]
@@ -317,6 +326,8 @@ def test_roundtrip_export(env, tmp_path):
     assert [round(p.db, 2) for p in boom.volume] == [round(-6.0206, 2), round(-12.0412, 2)]
     w = tl.audio_tracks[2].clips[0]
     assert w.start == frames(86640 + 24)
+    # A3 carries automation (from Resolve's keyframes), so its fader setting doesn't apply
+    assert [round(p.db) for p in w.volume][:1] == [-12]
     assert tl.markers and tl.markers[0].name == "Door slam" and tl.markers[0].time == frames(86424)
     # export XML names the tracks
     raw = open(out.path, encoding="utf-8").read()
@@ -342,3 +353,21 @@ def test_moved_project_still_maps_orig(env, tmp_path):
     out = exporter.run(str(als), exporter.ExportOptions(out_dir=str(tmp_path / "e"), log=lambda m: None))
     raw = open(out.path, encoding="utf-8").read()
     assert "Whoosh.mxf" in raw and "Media" not in os.listdir(tmp_path / "e")
+
+
+def test_fader_not_folded_by_default(env, tmp_path):
+    from bridge import exporter
+    from bridge.readers.fcpxml import read as read_fcp
+    from bridge.als.writer import save_als
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path), selected=["A1"]))
+    root = _als(res.als_path)
+    trk = [t for t in root.findall("LiveSet/Tracks/AudioTrack")
+           if t.find("Name/EffectiveName").get("Value") == "ORIG - A1"][0]
+    trk.find(".//Mixer/Volume/Manual").set("Value", "0.0794328")          # -22 dB
+    save_als(etree.ElementTree(root), res.als_path)
+    for fader, want in ((False, -3.0), (True, -25.0)):
+        out = exporter.run(res.als_path, exporter.ExportOptions(
+            out_dir=str(tmp_path / f"e{fader}"), include_fader=fader, log=lambda m: None))
+        c = read_fcp(out.path).audio_tracks[0].clips[0]
+        assert c.gain_db == pytest.approx(want, abs=0.01)
