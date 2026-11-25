@@ -28,6 +28,7 @@ class ImportOptions:
     picture_tc: str | None = None       # timecode of the video's first frame; None = timeline start
     picture_video: object = None        # video.VideoSettings to transcode the picture; None = use as is
     prefix: str = ORIG_PREFIX
+    sample_rate: int = 48000           # rate of the converted WAVs = your Live audio rate
     log: callable = print
     progress: callable = None
 
@@ -63,10 +64,12 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
     os.makedirs(media_dir, exist_ok=True)
 
     log(f"Timeline '{tl.name}': {float(tl.frame_rate):.3f} fps, starts {seconds_to_tc(tl.start, tl.frame_rate, tl.drop_frame)}")
-    log(f"Live 0:00 = {seconds_to_tc(offset, tl.frame_rate, tl.drop_frame)}, tempo {opt.tempo} BPM")
+    log(f"Live 0:00 = {seconds_to_tc(offset, tl.frame_rate, tl.drop_frame)}, tempo {opt.tempo} BPM, "
+        f"audio at {opt.sample_rate} Hz")
 
     conv = MediaConverter(media_dir, tl.frame_rate, log=log,
-                          aaf_path=timeline_path if tl.source_format == "aaf" else None)
+                          aaf_path=timeline_path if tl.source_format == "aaf" else None,
+                          sample_rate=opt.sample_rate)
     conv.run(tl, opt.progress)
     warnings += conv.warnings
 
@@ -107,6 +110,7 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
     b.save(als_path)
 
     side = sc.make(tl, offset, opt.tempo)
+    side.media_sample_rate = opt.sample_rate
     for wav, src, chans in conv.links:
         side.media.append(sc.MediaLink(wav=os.path.abspath(wav), source=src, channels=chans))
     side.save(sc.Sidecar.path_for(als_path))
@@ -117,7 +121,8 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
         fh.write(f"Frame rate: {float(tl.frame_rate):.3f}{' DF' if tl.drop_frame else ''}\n")
         fh.write(f"Timeline start: {seconds_to_tc(tl.start, tl.frame_rate, tl.drop_frame)}\n")
         fh.write(f"Live 0:00 = {seconds_to_tc(offset, tl.frame_rate, tl.drop_frame)}\n")
-        fh.write(f"Tempo: {opt.tempo} BPM (keep it constant in this set)\n\n")
+        fh.write(f"Tempo: {opt.tempo} BPM (keep it constant in this set)\n")
+        fh.write(f"Audio converted to: {opt.sample_rate} Hz (timeline: {tl.sample_rate} Hz)\n\n")
         for t in tl.audio_tracks:
             mark = "x" if t.selected else " "
             fh.write(f"[{mark}] {t.name}: {len(t.clips)} clips\n")

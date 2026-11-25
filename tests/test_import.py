@@ -86,7 +86,7 @@ def test_fcpxml_to_live(env):
     assert clip.find("IsWarped").get("Value") == "false"
     assert abs(float(clip.find("SampleVolume").get("Value")) - tc.db_to_lin(-3)) < 1e-6
     wav = clip.find("SampleRef/FileRef/Path").get("Value")
-    assert wav.endswith("_ch1-2.wav") and os.path.exists(wav)
+    assert wav.endswith("_ch1-2_48k.wav") and os.path.exists(wav)
     # whoosh: 264 frames after 01:00:00:00 -> beats at 120 BPM
     wclip = tracks[3].find(".//Events/AudioClip")
     assert abs(float(wclip.get("Time")) - float(frames(264)) * 2) < 1e-9
@@ -168,3 +168,20 @@ def test_import_with_picture_transcode(env):
     assert pic.find("SampleRef/FileRef/Path").get("Value").endswith("_picture.mp4")
     # picture has TC 10:00:00:00, timeline starts 01:00:00:00 -> 9 h later in Live
     assert float(pic.get("Time")) > 9 * 3600 * 2 - 100
+
+
+def test_import_96k(env):
+    from bridge.media import probe
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=os.path.join(env["d"], "out96"), selected=["A1"],
+        sample_rate=96000))
+    root = _als(res.als_path)
+    clip = root.find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
+    wav = clip.find("SampleRef/FileRef/Path").get("Value")
+    a = next(s for s in probe(wav)["streams"] if s["codec_type"] == "audio")
+    assert a["sample_rate"] == "96000"
+    assert clip.find("SampleRef/DefaultSampleRate").get("Value") == "96000"
+    # position/in-point unchanged (seconds-based)
+    assert abs(float(clip.find("Loop/LoopStart").get("Value")) - float(frames(24))) < 1e-9
+    tags = probe(wav)["format"]["tags"]
+    assert int(tags["time_reference"]) == 36036 * 96000          # 10:00:00:00 @23.976

@@ -1,4 +1,5 @@
-"""Convert Resolve media (MXF, MOV, MP4, …) to 48 kHz WAV files Live can play.
+"""Convert Resolve media (MXF, MOV, MP4, …) to WAV files Live can play,
+at the sample rate you work in (48 kHz, 96 kHz, …).
 
 Only the tracks you tick are converted. Each source file + channel choice is
 converted once, as a whole file (so you keep handles to extend clips later),
@@ -17,6 +18,8 @@ from fractions import Fraction
 
 from .model import Timeline
 from .timecode import SAMPLE_RATE, tc_to_seconds
+
+SAMPLE_RATES = [44100, 48000, 88200, 96000]
 
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -121,7 +124,9 @@ def _channel_filter(layout: list[int], chans: list[int]) -> str:
 
 
 class MediaConverter:
-    def __init__(self, out_dir: str, frame_rate: Fraction, log=print, aaf_path: str | None = None):
+    def __init__(self, out_dir: str, frame_rate: Fraction, log=print, aaf_path: str | None = None,
+                 sample_rate: int = SAMPLE_RATE):
+        self.sr = int(sample_rate)
         self.out_dir = out_dir
         self.rate = frame_rate
         self.log = log
@@ -168,6 +173,7 @@ class MediaConverter:
 
         base = _safe(os.path.splitext(os.path.basename(real))[0])
         suffix = "" if (len(chans) == total) else "_ch" + "-".join(map(str, chans))
+        suffix += f"_{self.sr // 1000 if self.sr % 1000 == 0 else self.sr / 1000:g}k"
         out = os.path.join(self.out_dir, f"{base}{suffix}.wav")
         n = 2
         while out in self.cache.values() or (os.path.exists(out) and not self._same_source(out, real)):
@@ -182,16 +188,16 @@ class MediaConverter:
 
         cmd = [tool("ffmpeg"), "-y", "-v", "error", "-i", real,
                "-filter_complex", _channel_filter(layout, chans), "-map", "[out]",
-               "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s24le", "-write_bext", "1",
+               "-ar", str(self.sr), "-c:a", "pcm_s24le", "-write_bext", "1",
                "-rf64", "auto"]
         tc = source_timecode(info)
         if tc:
             try:
-                tr = int(round(tc_to_seconds(tc, self.rate) * SAMPLE_RATE))
+                tr = int(round(tc_to_seconds(tc, self.rate) * self.sr))
                 cmd += ["-metadata", f"time_reference={tr}"]
             except ValueError:
                 pass
-        cmd += ["-metadata", f"comment=bridge-source:{real}", out]
+        cmd += ["-metadata", f"comment=bridge-source:{real}|{self.sr}", out]
         self.log(f"Converting {os.path.basename(real)} → {os.path.basename(out)}")
         r = _run(cmd)
         if r.returncode != 0:
@@ -205,7 +211,7 @@ class MediaConverter:
         try:
             tags = probe(wav).get("format", {}).get("tags", {})
             comment = next((v for k, v in tags.items() if k.lower() == "comment"), "")
-            return comment == f"bridge-source:{real}"
+            return comment == f"bridge-source:{real}|{self.sr}"
         except Exception:
             return False
 

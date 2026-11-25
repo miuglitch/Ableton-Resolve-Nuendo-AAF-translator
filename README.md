@@ -27,7 +27,7 @@ the app builds each set from a template saved by **your** Live:
 
 1. In Live 12 (so the sets also open in Live 13), create a new empty Live Set.
 2. Delete all tracks except **one audio track**.
-3. Set **Preferences → Audio → Sample Rate to 48000**.
+3. (The template's sample rate doesn't matter — Live stores it as a preference.)
 4. Drag any WAV file onto that audio track in **Arrangement View**.
 5. Add one locator (Create → Add Locator).
 6. Save it as `Bridge Template.als`, e.g. in the app folder.
@@ -44,15 +44,17 @@ markers) or **AAF** (Fairlight export, linked media).
 2. Untick tracks you don't need (only ticked tracks are converted).
 3. **Live 0:00 = timecode:** defaults to the timeline start (usually
    01:00:00:00). Set e.g. `00:59:58:00` for two seconds of pre-roll.
-4. **Tempo:** any value, but keep it constant in the set; tempo changes would
+4. **Sample rate:** pick the rate your Live session runs at (e.g. 96000).
+   The choice is remembered.
+5. **Tempo:** any value, but keep it constant in the set; tempo changes would
    move audio against picture.
-5. Optional **picture reference**. Its start timecode is read from the file
+6. Optional **picture reference**. Its start timecode is read from the file
    (or typed in). Tick *Transcode picture for Live* to convert it first:
    codec (H.264 .mp4/.mov, ProRes Proxy/LT, DNxHR LB .mov/.mxf, MJPEG),
    frame rate, resolution, keyframe interval (1 = every frame, best for
    scrubbing), keep audio, burn-in timecode. It lands on a `PICTURE` track.
    The *Picture transcode* tab does the same for any video file.
-6. **Create Live Set.**
+7. **Create Live Set.**
 
 Result, in the folder you chose:
 ```
@@ -60,7 +62,7 @@ Result, in the folder you chose:
   <Name>.als                 open in Live
   <Name>.bridge.json         remembers offset, tempo, frame rate, media origin (needed for export)
   <Name> - import report.txt what was imported + warnings
-  Media/Imported/*.wav       48 kHz/24-bit WAVs with the original timecode (BWF)
+  Media/Imported/*.wav       24-bit WAVs at the rate you pick (44.1–96 kHz), with original timecode (BWF)
 ```
 
 What comes across: clip positions and trims, clip gain, fades, volume

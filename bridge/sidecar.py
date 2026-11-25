@@ -43,7 +43,8 @@ class Sidecar:
     timeline_start: str              # seconds, 'n/d'
     offset: str                      # seconds subtracted so Live starts at 0, 'n/d'
     tempo: float
-    sample_rate: int = 48000
+    sample_rate: int = 48000             # Resolve timeline rate
+    media_sample_rate: int = 48000       # rate the WAVs were converted to (Live session rate)
     media: list[MediaLink] = field(default_factory=list)
     version: int = VERSION
 

@@ -23,6 +23,7 @@ def main(argv=None):
     i.add_argument("--picture", default=None)
     i.add_argument("--picture-tc", default=None)
     i.add_argument("--prefix", default=importer.ORIG_PREFIX)
+    i.add_argument("--sample-rate", type=int, default=48000, choices=[44100, 48000, 88200, 96000])
 
     l = sub.add_parser("list", help="show tracks in a timeline")
     l.add_argument("timeline")
@@ -40,7 +41,8 @@ def main(argv=None):
     opt = importer.ImportOptions(
         template=a.template, out_dir=a.out, set_name=a.name, tempo=a.tempo,
         offset_tc=a.offset, selected=a.tracks.split(",") if a.tracks else None,
-        picture=a.picture, picture_tc=a.picture_tc, prefix=a.prefix)
+        picture=a.picture, picture_tc=a.picture_tc, prefix=a.prefix,
+        sample_rate=a.sample_rate)
     importer.run(a.timeline, opt)
     return 0
 

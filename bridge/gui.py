@@ -109,6 +109,7 @@ class App(tk.Tk):
         self.v_out = tk.StringVar(value=self.settings.get("out_dir", ""))
         self.v_name = tk.StringVar()
         self.v_tempo = tk.StringVar(value=str(self.settings.get("tempo", 120)))
+        self.v_sr = tk.StringVar(value=str(self.settings.get("sample_rate", 48000)))
         self.v_offset = tk.StringVar()
         self.v_pic = tk.StringVar()
         self.v_pic_tc = tk.StringVar()
@@ -118,7 +119,13 @@ class App(tk.Tk):
                   lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), 1)
         self._row(f, "Save project in", self.v_out, self._pick_out, 2)
         self._row(f, "Set name", self.v_name, None, 3)
-        self._row(f, "Tempo (BPM)", self.v_tempo, None, 4)
+        ttk.Label(f, text="Tempo (BPM)").grid(row=4, column=0, sticky="w", pady=2)
+        row4 = ttk.Frame(f)
+        row4.grid(row=4, column=1, sticky="w", padx=4)
+        ttk.Entry(row4, textvariable=self.v_tempo, width=8).pack(side="left")
+        ttk.Label(row4, text="   Sample rate (Hz)").pack(side="left")
+        ttk.Combobox(row4, textvariable=self.v_sr, state="readonly", width=8,
+                     values=["44100", "48000", "88200", "96000"]).pack(side="left", padx=4)
         self._row(f, "Live 0:00 = timecode", self.v_offset, None, 5)
         self._row(f, "Picture reference (optional)", self.v_pic,
                   lambda: self._pick(self.v_pic, [("Video", "*.mov *.mp4 *.m4v"), ("All", "*.*")]), 6)
@@ -260,12 +267,13 @@ class App(tk.Tk):
             messagebox.showerror("Tempo", "Tempo must be a number.")
             return
         self.settings.update(template=self.v_tpl.get(), out_dir=self.v_out.get(), tempo=tempo,
-                             picture_convert=self.v_pic_conv.get())
+                             picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()))
         save_settings(self.settings)
 
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
+            sample_rate=int(self.v_sr.get()),
             picture=self.v_pic.get() or None, picture_tc=self.v_pic_tc.get() or None,
             picture_video=self.pic_panel.get() if self.v_pic_conv.get() else None,
             log=lambda m: self.after(0, self._log, m),
