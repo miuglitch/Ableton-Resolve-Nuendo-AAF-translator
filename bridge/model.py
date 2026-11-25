@@ -30,6 +30,8 @@ class Clip:
     volume: list[VolumePoint] = field(default_factory=list)
     pan: Optional[float] = None     # -1..1, None = not set
     enabled: bool = True
+    speed: Fraction = Fraction(1)   # media seconds per timeline second (0.5 = slow motion)
+    color: Optional[int] = None     # Live colour for this clip (None = track colour)
     # filled by the media step: the WAV Live will actually play
     wav_path: Optional[str] = None
     wav_offset: Fraction = Fraction(0)  # seconds to add to source_in inside wav
@@ -65,6 +67,8 @@ class Timeline:
     sample_rate: int = 48000
     tracks: list[Track] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
+    width: int = 1920               # timeline frame size
+    height: int = 1080
     source_format: str = ""         # 'fcpxml' / 'aaf'
     source_file: str = ""
     warnings: list[str] = field(default_factory=list)

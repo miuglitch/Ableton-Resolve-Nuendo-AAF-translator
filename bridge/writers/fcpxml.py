@@ -78,6 +78,7 @@ def _audio_clip(parent, c, a, aid, lane, local_offset, rate, trk_name):
 def _video_clip(parent, c, a, aid, lane, local_offset, rate):
     """<clip> holding only a <video> part, so the file's own audio isn't added."""
     src_start = a.start + c.source_in
+    speed = Fraction(c.speed or 1)
     el = etree.SubElement(parent, "clip", name=c.name or os.path.basename(a.path),
                           offset=_t(local_offset, rate), start=_t(src_start, rate),
                           duration=_t(c.duration, rate))
@@ -85,8 +86,13 @@ def _video_clip(parent, c, a, aid, lane, local_offset, rate):
         el.set("lane", str(lane))
     if not c.enabled:
         el.set("enabled", "0")
+    if speed != 1:                      # retime: clip time -> media time
+        tm = etree.SubElement(el, "timeMap")
+        etree.SubElement(tm, "timept", time=_t(src_start, rate), value=_t(src_start, rate), interp="linear")
+        etree.SubElement(tm, "timept", time=_t(src_start + c.duration, rate),
+                         value=_t(src_start + c.duration * speed, rate), interp="linear")
     etree.SubElement(el, "video", ref=aid, offset=_t(src_start, rate), start=_t(src_start, rate),
-                     duration=_t(c.duration, rate))
+                     duration=_t(c.duration * speed, rate))
     return el
 
 

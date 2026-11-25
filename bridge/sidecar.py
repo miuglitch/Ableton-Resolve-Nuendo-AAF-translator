@@ -102,7 +102,7 @@ def clip_to_dict(c) -> dict:
     return {"name": c.name, "start": _f(c.start), "duration": _f(c.duration),
             "source": c.source_path, "source_in": _f(c.source_in), "channels": list(c.channels),
             "gain_db": c.gain_db, "fade_in": _f(c.fade_in), "fade_out": _f(c.fade_out),
-            "enabled": c.enabled}
+            "enabled": c.enabled, "speed": _f(Fraction(c.speed or 1))}
 
 
 def clip_from_dict(d):
@@ -111,7 +111,7 @@ def clip_from_dict(d):
                 source_path=d["source"], source_in=_p(d["source_in"]),
                 channels=list(d.get("channels", [])), gain_db=d.get("gain_db", 0.0),
                 fade_in=_p(d.get("fade_in", "0/1")), fade_out=_p(d.get("fade_out", "0/1")),
-                enabled=d.get("enabled", True))
+                enabled=d.get("enabled", True), speed=_p(d.get("speed", "1/1")))
 
 
 def tracks_to_list(tracks) -> list[dict]:

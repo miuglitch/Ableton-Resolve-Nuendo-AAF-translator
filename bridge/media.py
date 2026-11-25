@@ -215,6 +215,38 @@ class MediaConverter:
         except Exception:
             return False
 
+    def convert_retimed(self, c) -> str:
+        """A retimed clip gets its own WAV: the used part of the source, played
+        at the clip's speed (pitch kept, like Resolve's default retime)."""
+        from .readers.aaf import EMBEDDED
+        real = self._embedded(c.source_path) if c.source_path.startswith(EMBEDDED) else c.source_path
+        info = self._info(real)
+        layout = audio_layout(info)
+        total = sum(layout)
+        chans = [x for x in c.channels if 1 <= x <= total] or list(range(1, min(total, 2) + 1))
+        chans = chans[:2]
+        speed = float(c.speed)
+        tempo, chain = speed, []
+        while tempo > 2.0:
+            chain.append("atempo=2.0"); tempo /= 2.0
+        while tempo < 0.5:
+            chain.append("atempo=0.5"); tempo /= 0.5
+        chain.append(f"atempo={tempo:.6f}")
+        base = _safe(os.path.splitext(os.path.basename(real))[0])
+        n = len([v for v in self.cache.values() if "_retime" in v]) + 1
+        out = os.path.join(self.out_dir, f"{base}_retime{n:03d}_{speed * 100:.0f}pct_{self.sr // 1000}k.wav")
+        filt = _channel_filter(layout, chans).replace("[out]", "[mix]") + f";[mix]{','.join(chain)}[out]"
+        cmd = [tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{float(c.source_in):.6f}",
+               "-t", f"{float(c.duration * c.speed):.6f}", "-i", real,
+               "-filter_complex", filt, "-map", "[out]", "-ar", str(self.sr), "-c:a", "pcm_s24le", out]
+        self.log(f"Retimed audio {os.path.basename(real)} at {speed * 100:.0f}%")
+        r = _run(cmd)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed on {real}: {r.stderr.strip()}")
+        self.cache[("retime", out)] = out
+        c.channels = chans
+        return out
+
     def run(self, tl: Timeline, log_progress=None) -> None:
         """Convert every clip on selected audio tracks; sets clip.wav_path."""
         clips = [(t, c) for t in tl.audio_tracks if t.selected for c in t.clips]
@@ -222,6 +254,10 @@ class MediaConverter:
             if log_progress:
                 log_progress(i, len(clips))
             try:
+                if c.speed and c.speed != 1:
+                    c.wav_path = self.convert_retimed(c)
+                    c.wav_offset = -c.source_in          # the WAV starts at the clip's first sample
+                    continue
                 wav, chans = self.convert(c.source_path, c.channels)
                 c.wav_path = wav
                 c.channels = chans

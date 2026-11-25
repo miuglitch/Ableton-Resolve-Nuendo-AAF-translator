@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 from . import sidecar as sc
-from .als.writer import AlsBuilder, LIVE_COLORS
+from .als.writer import AlsBuilder, LIVE_COLORS, VIDEO_COLORS
 from .media import MediaConverter, probe, source_timecode
 from .model import Clip, Timeline
 from .readers import read_timeline
@@ -32,6 +32,7 @@ class ImportOptions:
     video_markers: bool = False         # a locator at every video clip start, named after the clip
     video_clips: object = None          # video.VideoSettings: put Resolve's video clips on Live tracks
     video_handles: float = 1.0          # seconds kept before/after each video clip
+    video_full_extent: bool = False     # convert the whole source file instead of clip + handles
     prefix: str = ORIG_PREFIX
     sample_rate: int = 48000           # rate of the converted WAVs = your Live audio rate
     # add to an existing Live project instead of creating a new one
@@ -167,31 +168,56 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
 
     video_tracks = [t for t in tl.tracks if t.kind == "video" and t.clips]
     if opt.video_clips is not None and video_tracks:
+        import copy as _copy
         from .video import transcode_segment, CODECS
         vdir = os.path.join(project_dir, "Samples", "Video")
         os.makedirs(vdir, exist_ok=True)
-        ext = CODECS[opt.video_clips.codec][0]
+        vs = _copy.copy(opt.video_clips)
+        vs.frame_w, vs.frame_h = tl.width, tl.height
+        ext = CODECS[vs.codec][0]
+        handle = Fraction(str(max(0.0, opt.video_handles)))
+        full_cache: dict = {}
         for vt in reversed(video_tracks):                # V2 above V1, like Resolve
             clips = []
             for i, c in enumerate(vt.clips, start=1):
                 if not os.path.exists(c.source_path):
                     warnings.append(f"Video file not found: {c.source_path}")
                     continue
-                pre = min(Fraction(str(opt.video_handles)), c.source_in)
-                seg_start = c.source_in - pre
-                seg_len = c.duration + pre + Fraction(str(opt.video_handles))
+                speed = c.speed or Fraction(1)
                 base = re.sub(r'[<>:"/\\|?*]', "_", os.path.splitext(c.name or os.path.basename(c.source_path))[0])
-                dst = os.path.join(vdir, f"{vt.name}_{i:03d}_{base}{ext}")
+                tag = "" if speed == 1 else f"_{float(speed) * 100:.0f}pct"
+                if opt.video_full_extent:
+                    # whole file once per source + speed; clips point into it
+                    key = (c.source_path, speed)
+                    dst = os.path.join(vdir, f"{base}{tag}_full{ext}")
+                    seg_start, seg_len = Fraction(0), None
+                    live_in = c.source_in / speed
+                else:
+                    key = None
+                    pre = min(handle, c.source_in / speed)          # handles in timeline seconds
+                    seg_start = c.source_in - pre * speed
+                    seg_len = (c.duration + pre + handle) * speed   # media seconds
+                    dst = os.path.join(vdir, f"{vt.name}_{i:03d}_{base}{tag}{ext}")
+                    live_in = pre
                 try:
-                    if not os.path.exists(dst):
-                        log(f"Video clip {i}/{len(vt.clips)} on {vt.name}: {c.name}")
-                        transcode_segment(c.source_path, dst, float(seg_start), float(seg_len), opt.video_clips)
+                    if key is not None and key in full_cache:
+                        pass
+                    elif not os.path.exists(dst):
+                        log(f"Video clip {i}/{len(vt.clips)} on {vt.name}: {c.name}"
+                            + (f" ({float(speed) * 100:.0f}% speed)" if speed != 1 else ""))
+                        if seg_len is None:
+                            seg_len = Fraction(str(float(probe(c.source_path)["format"]["duration"])))
+                        transcode_segment(c.source_path, dst, float(seg_start), float(seg_len), vs,
+                                          speed=speed, out_rate=tl.frame_rate)
+                    if key is not None:
+                        full_cache[key] = dst
                 except Exception as e:
                     warnings.append(f"{vt.name} / {c.name}: {e}")
                     continue
                 vc = Clip(name=c.name, start=c.start, duration=c.duration, source_path=dst,
-                          source_in=pre, enabled=c.enabled)
+                          source_in=live_in, enabled=c.enabled)
                 vc.wav_path = dst
+                vc.color = VIDEO_COLORS[len(clips) % 2]           # alternate per clip
                 clips.append(vc)
             if clips:
                 b.add_track(f"VIDEO {vt.name}", clips, offset, LIVE_COLORS["VIDEO"], warnings)

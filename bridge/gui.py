@@ -137,6 +137,8 @@ class VideoPanel(Card):
         self.v_gop = tk.StringVar(value=str(d.get("keyframe_interval", 1)))
         self.v_audio = tk.BooleanVar(value=d.get("keep_audio", False))
         self.v_tc = tk.BooleanVar(value=d.get("burn_timecode", False))
+        fr = d.get("framing", video.FRAMINGS[0])
+        self.v_framing = tk.StringVar(value=fr if fr in video.FRAMINGS else video.FRAMINGS[0])
 
         g = ctk.CTkFrame(self, fg_color="transparent")
         g.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 12))
@@ -149,8 +151,12 @@ class VideoPanel(Card):
         label(g, "Keyframe every (frames)").grid(row=0, column=3, sticky="w")
         self.gop = entry(g, self.v_gop, 70)
         self.gop.grid(row=1, column=3, sticky="w")
+        label(g, "Framing").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        combo(g, self.v_framing, video.FRAMINGS, 210).grid(row=3, column=0, sticky="w", padx=(0, 12))
+        label(g, "Fit adds bars, Crop fills the frame; both match the timeline's aspect ratio").grid(
+            row=3, column=1, columnspan=3, sticky="w")
         row = ctk.CTkFrame(g, fg_color="transparent")
-        row.grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
         check(row, "Keep audio", self.v_audio).pack(side="left", padx=(0, 18))
         check(row, "Burn in timecode", self.v_tc).pack(side="left")
         self.v_codec.trace_add("write", lambda *a: self._gop_state())
@@ -168,7 +174,8 @@ class VideoPanel(Card):
             gop = 1
         s = video.VideoSettings(codec=self.v_codec.get(), frame_rate=self.v_rate.get(),
                                 resolution=self.v_res.get(), keyframe_interval=gop,
-                                keep_audio=self.v_audio.get(), burn_timecode=self.v_tc.get())
+                                keep_audio=self.v_audio.get(), burn_timecode=self.v_tc.get(),
+                                framing=self.v_framing.get())
         self.settings[self.key] = s.__dict__
         return s
 
@@ -427,10 +434,23 @@ class App(Base):
         pc.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         self.v_vclips = tk.BooleanVar(value=s.get("video_clips", True))
         self.v_vmarks = tk.BooleanVar(value=s.get("video_markers", True))
-        vrow = ctk.CTkFrame(pc, fg_color="transparent")
-        vrow.grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(2, 4))
+        vbox = ctk.CTkFrame(pc, fg_color="transparent")
+        vbox.grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(2, 4))
+        vrow = ctk.CTkFrame(vbox, fg_color="transparent")
+        vrow.pack(anchor="w")
         check(vrow, "Timeline's video clips on their own tracks", self.v_vclips).pack(side="left", padx=(0, 18))
         check(vrow, "Locator at every video clip, named after it", self.v_vmarks).pack(side="left")
+        self.v_handles = tk.StringVar(value=str(s.get("video_handles", 1.0)))
+        self.v_full = tk.BooleanVar(value=s.get("video_full_extent", False))
+        hrow = ctk.CTkFrame(vbox, fg_color="transparent")
+        hrow.pack(anchor="w", pady=(8, 0))
+        label(hrow, "Handles (seconds)").pack(side="left")
+        self.handles_entry = entry(hrow, self.v_handles, 60)
+        self.handles_entry.pack(side="left", padx=(8, 18))
+        check(hrow, "Full extent (whole source files)", self.v_full).pack(side="left")
+        self.v_full.trace_add("write", lambda *a: self.handles_entry.configure(
+            state="disabled" if self.v_full.get() else "normal",
+            text_color=DIM if self.v_full.get() else TEXT))
         self.vinfo = label(pc, "")
         self.vinfo.grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 2))
         label(pc, "Optional picture reference (one rendered file):").grid(
@@ -641,6 +661,12 @@ class App(Base):
         y0, h0 = self._grip
         self._set_list_height(h0 + (event.y_root - y0))
 
+    def _handles(self) -> float:
+        try:
+            return max(0.0, float(self.v_handles.get().replace(",", ".")))
+        except ValueError:
+            return 1.0
+
     def _all(self, on):
         for _, v in self.track_vars:
             v.set(on)
@@ -670,7 +696,8 @@ class App(Base):
             self.settings["out_dir"] = self.v_out.get()
         self.settings.update(template=self.v_tpl.get(), neighbour_folder=self.v_next.get(), tempo=tempo,
                              picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()),
-                             video_clips=self.v_vclips.get(), video_markers=self.v_vmarks.get())
+                             video_clips=self.v_vclips.get(), video_markers=self.v_vmarks.get(),
+                             video_handles=self._handles(), video_full_extent=self.v_full.get())
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
@@ -681,6 +708,7 @@ class App(Base):
             picture_video=self.pic_panel.get() if self.v_pic_conv.get() else None,
             video_clips=self.pic_panel.get() if self.v_vclips.get() else None,
             video_markers=self.v_vmarks.get(),
+            video_handles=self._handles(), video_full_extent=self.v_full.get(),
             log=lambda m: self.after(0, self._log, m),
             progress=lambda i, n: self.after(0, self.bar.set, (i + 1) / max(n, 1)))
         save_settings(self.settings)

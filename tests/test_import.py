@@ -209,9 +209,15 @@ def test_picture_keeps_aspect(tmp_path):
     fx.ff("-f", "lavfi", "-i", "testsrc=size=1440x804:rate=24:duration=1",
           "-vf", "setsar=4/3", "-c:v", "mpeg4", str(src))          # displays as 1920x804
     out = video.transcode(str(src), str(tmp_path / "o"),
-                          video.VideoSettings(resolution="720p"), log=lambda m: None)
+                          video.VideoSettings(resolution="720p", framing=video.FRAMINGS[2]), log=lambda m: None)
     v = next(x for x in media.probe(out)["streams"] if x["codec_type"] == "video")
     assert v["height"] == 720 and abs(v["width"] / v["height"] - 1440 / 804) < 0.01
+    # fit / crop to a 16:9 timeline frame: always the timeline's aspect
+    for fr in video.FRAMINGS[:2]:
+        o = video.transcode(str(src), str(tmp_path / fr[:3]), video.VideoSettings(
+            resolution="720p", framing=fr, frame_w=1920, frame_h=1080), log=lambda m: None)
+        v = next(x for x in media.probe(o)["streams"] if x["codec_type"] == "video")
+        assert (v["width"], v["height"]) == (1280, 720)
     assert v.get("sample_aspect_ratio", "1:1") in ("1:1", "0:1", "N/A")
 
 
@@ -395,3 +401,71 @@ def test_video_clips_and_markers(env, tmp_path):
     locs = [(l.find("Name").get("Value"), float(l.find("Time").get("Value")))
             for l in root.findall("LiveSet/Locators/Locators/Locator")]
     assert ("A001_C003 cam", 0.0) in locs and any(n == "Door slam" for n, _ in locs)
+
+
+def test_retimed_and_conformed_video(tmp_path):
+    """50 fps clip conformed into a 25 fps timeline (half speed) and a 200 % retime."""
+    from bridge import video, media
+    src = tmp_path / "fifty.mov"
+    fx.ff("-f", "lavfi", "-i", "testsrc=size=640x360:rate=50:duration=12", "-c:v", "mpeg4",
+          "-timecode", "12:00:00:00", str(src))
+    sfx = tmp_path / "s.wav"
+    fx.ff("-f", "lavfi", "-i", "sine=d=12", "-ar", "48000", str(sfx))
+    import pathlib
+    u = pathlib.Path(src).as_uri()
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.9"><resources>
+ <format id="r0" frameDuration="1/25s" width="1920" height="1080"/>
+ <format id="r9" frameDuration="1/50s" width="640" height="360"/>
+ <asset id="r1" name="fifty" start="43200s" duration="12s" hasVideo="1" format="r9"><media-rep kind="original-media" src="{u}"/></asset>
+</resources><library><event><project name="Mix"><sequence format="r0" duration="10s" tcStart="3600s" tcFormat="NDF" audioRate="48k"><spine>
+ <asset-clip ref="r1" offset="3600s" name="slow" start="43202s" duration="4s"><conform-rate srcFrameRate="50"/></asset-clip>
+ <clip offset="3604s" name="fast" start="0s" duration="2s">
+  <timeMap><timept time="0s" value="43206s" interp="linear"/><timept time="2s" value="43210s" interp="linear"/></timeMap>
+  <video ref="r1" offset="0s" start="43206s" duration="2s"/>
+ </clip>
+</spine></sequence></project></event></library></fcpxml>"""
+    p = tmp_path / "mix.fcpxml"
+    p.write_text(xml)
+    tl = importer.load(str(p))
+    assert (tl.width, tl.height) == (1920, 1080)
+    v1 = [t for t in tl.tracks if t.kind == "video"][0].clips
+    assert v1[0].speed == Fraction(1, 2) and v1[0].source_in == 2
+    assert v1[1].speed == 2 and v1[1].source_in == 6 and v1[1].start == 3604
+    tpl = fx.template(str(tmp_path))
+    res = importer.run(str(p), importer.ImportOptions(
+        template=tpl, out_dir=str(tmp_path / "o"), selected=[], video_handles=0.5,
+        video_clips=video.VideoSettings(resolution="360p")))
+    root = _als(res.als_path)
+    clips = root.find("LiveSet/Tracks/AudioTrack").findall(".//Events/AudioClip")
+    assert [c.find("Color").get("Value") for c in clips] == ["21", "13"]
+    for c, want in zip(clips, (5.0, 3.0)):                 # 4 s + 2×0.5 s, 2 s + 2×0.5 s
+        path = c.find("SampleRef/FileRef/Path").get("Value")
+        info = media.probe(path)
+        vs = next(x for x in info["streams"] if x["codec_type"] == "video")
+        assert vs["r_frame_rate"] == "25/1" and (vs["width"], vs["height"]) == (640, 360)
+        assert abs(float(info["format"]["duration"]) - want) < 0.1, (path, info["format"]["duration"])
+        assert abs(float(c.find("Loop/LoopStart").get("Value")) - 0.5) < 1e-6
+    # full extent: one file for the whole source per speed
+    res2 = importer.run(str(p), importer.ImportOptions(
+        template=tpl, out_dir=str(tmp_path / "o2"), selected=[], video_full_extent=True,
+        video_clips=video.VideoSettings(resolution="360p")))
+    clips = _als(res2.als_path).find("LiveSet/Tracks/AudioTrack").findall(".//Events/AudioClip")
+    p0 = clips[0].find("SampleRef/FileRef/Path").get("Value")
+    assert p0.endswith("_50pct_full.mp4")
+    assert abs(float(media.probe(p0)["format"]["duration"]) - 24) < 0.2   # 12 s at half speed
+    assert abs(float(clips[0].find("Loop/LoopStart").get("Value")) - 4.0) < 1e-6
+
+
+def test_retimed_audio(env, tmp_path):
+    from bridge import media
+    tl = importer.load(env["fcp"])
+    c = tl.audio_tracks[0].clips[0]
+    c.speed = Fraction(1, 2)                               # half speed: 10 s clip uses 5 s of media
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path), selected=["A1"]), tl=tl)
+    clip = _als(res.als_path).find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
+    wav = clip.find("SampleRef/FileRef/Path").get("Value")
+    assert "_retime001_50pct_" in wav
+    assert abs(float(media.probe(wav)["format"]["duration"]) - float(c.duration)) < 0.05
+    assert abs(float(clip.find("Loop/LoopStart").get("Value"))) < 1e-9

@@ -61,6 +61,14 @@ markers) or **AAF** (Fairlight export, linked media).
   scrubs best) and placed on a `VIDEO V1`, `VIDEO V2`… track, so you can select and
   loop a shot. Files go to `Samples\Video`.
 - *Locator at every video clip*: a locator at each cut, named after the clip.
+- *Handles*: seconds kept before/after each clip; *Full extent* converts whole
+  source files instead (one file per source and speed).
+- *Framing*: Fit to timeline frame (bars), Crop to fill, or keep the clip's aspect.
+  Fit and Crop always give the timeline's aspect ratio.
+- Retimed clips (timeMap) and conformed frame rates (e.g. 50 fps shot played in a
+  25 fps timeline) are converted at their speed and written at the timeline's
+  frame rate. Speed ramps use their average speed. Retimed audio clips get their own
+  WAV at that speed. Video clips alternate cyan/white so cuts are easy to see.
 - For timelines with video, export **FCPXML** from Resolve: its AAF export re-renders
   everything to DNx MXF, which can change resolution and frame rate.
 - Track colours: audio from Resolve = sky blue, video clips = violet,

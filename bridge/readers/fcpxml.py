@@ -9,7 +9,7 @@ from lxml import etree
 
 from ..paths import url_to_path
 from ..model import Clip, Marker, Timeline, Track, VolumePoint
-from ..timecode import parse_fcp_time as T
+from ..timecode import parse_fcp_time as T, parse_rate
 
 CLIP_TAGS = {"asset-clip", "clip", "audio", "video", "gap", "ref-clip",
              "sync-clip", "mc-clip", "title", "transition"}
@@ -35,6 +35,19 @@ def _channels(s: str | None) -> list[int]:
     return out
 
 
+def _interp(pts, t):
+    """Piecewise-linear lookup in [(time, value), …]."""
+    if t <= pts[0][0]:
+        (t0, v0), (t1, v1) = pts[0], pts[1]
+    elif t >= pts[-1][0]:
+        (t0, v0), (t1, v1) = pts[-2], pts[-1]
+    else:
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            if t0 <= t <= t1:
+                break
+    return v0 + (v1 - v0) * (t - t0) / (t1 - t0) if t1 != t0 else v0
+
+
 class _Reader:
     def __init__(self, root, path):
         self.root = root
@@ -46,6 +59,7 @@ class _Reader:
         self.markers: list[Marker] = []
         self.warnings: list[str] = []
         self.video_clips = []
+        self.rate = Fraction(25)
         for f in root.iter("format"):
             self.formats[f.get("id")] = f
         for a in root.iter("asset"):
@@ -89,8 +103,31 @@ class _Reader:
         ))
 
     # -- traversal -------------------------------------------------------
+    def _retime(self, el, start):
+        """Speed change of a clip: from <timeMap> (retime) or <conform-rate>
+        (e.g. 50 fps shot played frame-for-frame in a 25 fps timeline).
+        Returns (speed, media_time_at_start or None) or None."""
+        tm = el.find("timeMap")
+        if tm is not None:
+            pts = [(T(p.get("time")), T(p.get("value"))) for p in tm.findall("timept")]
+            if len(pts) >= 2:
+                speed = (pts[-1][1] - pts[0][1]) / (pts[-1][0] - pts[0][0])
+                slopes = {round(float((v1 - v0) / (t1 - t0)), 4)
+                          for (t0, v0), (t1, v1) in zip(pts, pts[1:]) if t1 != t0}
+                if len(slopes) > 1:
+                    self.warnings.append(
+                        f"'{el.get('name')}' has a speed ramp; Live gets its average speed "
+                        f"({float(speed) * 100:.0f}%).")
+                return speed, _interp(pts, start)
+        cr = el.find("conform-rate")
+        if cr is not None and cr.get("scaleEnabled", "1") != "0" and cr.get("srcFrameRate"):
+            src = parse_rate(cr.get("srcFrameRate"))
+            if src and src != self.rate:
+                return self.rate / src, None
+        return None
+
     def walk(self, parent, parent_abs: Fraction, parent_start: Fraction,
-             parent_lane: int, in_spine: bool, inherited_enabled=True):
+             parent_lane: int, in_spine: bool, inherited_enabled=True, inherited_retime=None):
         for el in parent:
             tag = el.tag if isinstance(el.tag, str) else ""
             if tag in ("marker", "chapter-marker"):
@@ -112,8 +149,14 @@ class _Reader:
             abs_start = parent_abs + (offset - parent_start)
 
             if tag in ("asset-clip", "audio", "video"):
-                self._media_clip(el, tag, abs_start, start, dur, lane, enabled)
-            elif tag == "ref-clip":
+                retime = self._retime(el, start) or (inherited_retime if el.get("lane") is None else None)
+                self._media_clip(el, tag, abs_start, start, dur, lane, enabled, retime)
+                child_retime = None
+            elif tag == "clip":
+                child_retime = self._retime(el, start)       # applies to its inner video/audio
+            else:
+                child_retime = None
+            if tag == "ref-clip":
                 self.warnings.append(
                     f"Compound clip '{el.get('name')}' at {float(abs_start):.2f}s "
                     "was skipped — decompose compound clips in Resolve before export.")
@@ -123,21 +166,29 @@ class _Reader:
                     "flatten multicam/synced clips in Resolve for best results.")
 
             # children (connected clips, markers, inner audio/video of <clip>)
-            self.walk(el, abs_start, start, lane, False, enabled)
+            self.walk(el, abs_start, start, lane, False, enabled, child_retime)
 
-    def _media_clip(self, el, tag, abs_start, start, dur, lane, enabled):
+    def _media_clip(self, el, tag, abs_start, start, dur, lane, enabled, retime=None):
         asset = self.assets.get(el.get("ref"))
         if asset is None:
             return
         has_audio = asset.get("hasAudio") == "1" or tag == "audio"
         has_video = asset.get("hasVideo") == "1" and tag != "audio"
         path = self.asset_path(asset)
-        src_in = start - T(asset.get("start"))
+        a_start = T(asset.get("start"))
+        src_in = start - a_start
+        speed = Fraction(1)
+        if retime:
+            speed, media_at_start = retime
+            if media_at_start is not None:
+                # timeMap values are media time; some writers count from the media start
+                src_in = media_at_start - a_start if media_at_start >= a_start or a_start == 0 \
+                    else media_at_start
         name = el.get("name") or asset.get("name") or os.path.basename(path)
 
         if has_video and tag != "audio" and lane >= 0:
             self.video_clips.append((lane, Clip(name, abs_start, dur, path, src_in,
-                                                enabled=enabled)))
+                                                enabled=enabled, speed=speed)))
         if not has_audio or tag == "video":
             return
         implicit = has_video and lane >= 0          # audio carried inside a video clip
@@ -155,7 +206,7 @@ class _Reader:
         if not chans and asset.get("audioChannels") == "1":
             chans = [1]
         clip = Clip(name, abs_start, dur, path, src_in, channels=sorted(set(chans)),
-                    enabled=enabled)
+                    enabled=enabled, speed=speed)
         self._volume(el, clip, start)
         self.raw_clips.append((lane, clip, el.get("ref"), implicit))
 
@@ -183,11 +234,14 @@ def read(path: str, project_name: str | None = None) -> Timeline:
         rate = 1 / T(fmt.get("frameDuration"))
     else:
         rate = Fraction(25)
+    r.rate = rate
     tc_start = T(seq.get("tcStart"))
     drop = (seq.get("tcFormat") == "DF")
 
     tl = Timeline(name=name, frame_rate=rate, drop_frame=drop, start=tc_start,
                   source_format="fcpxml", source_file=os.path.abspath(path))
+    if fmt is not None and fmt.get("width") and fmt.get("height"):
+        tl.width, tl.height = int(fmt.get("width")), int(fmt.get("height"))
     ar = seq.get("audioRate", "48k").lower()
     tl.sample_rate = int(float(ar.replace("k", "")) * 1000) if "k" in ar else int(ar or 48000)
 

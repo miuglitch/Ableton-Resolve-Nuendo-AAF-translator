@@ -68,6 +68,7 @@ LIVE_COLORS = {"ORIG": 8,       # audio from Resolve: sky blue
                "PICTURE": 27,   # picture reference: grey
                "SD": 2,         # new sound design (not set by the app)
                None: 8}
+VIDEO_COLORS = (21, 13)          # video clips alternate: cyan, white
 
 
 def load_als(path: str) -> etree._ElementTree:
@@ -313,7 +314,7 @@ class AlsBuilder:
                     warnings.append(f"{name} / {c.name}: starts before the offset point — skipped. "
                                     "Lower the offset to include it.")
                 continue
-            events.append(self._clip(c, live_start, cid, color))
+            events.append(self._clip(c, live_start, cid, c.color if c.color is not None else color))
             cid += 1
             if c.volume:
                 auto_points.append((live_start, c))
