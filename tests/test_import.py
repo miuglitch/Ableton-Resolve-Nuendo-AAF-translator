@@ -125,3 +125,14 @@ def test_aaf_read_and_import(env):
     res = importer.run(env["aaf"], importer.ImportOptions(
         template=env["tpl"], out_dir=os.path.join(env["d"], "out3")))
     assert not [w for w in res.warnings if "offline" in w.lower()], res.warnings
+
+
+def test_url_spellings():
+    from bridge.paths import url_to_path as u
+    assert u("file:///D:/a%20b.wav") == "D:/a b.wav"
+    assert u("file://localhost/D:/a.wav") == "D:/a.wav"
+    assert u("file://C:\\Users\\x\\a.mxf") == "C:\\Users\\x\\a.mxf"
+    assert u("file:/D:/a.wav") == "D:/a.wav"
+    assert u("file://server/share/a.wav") == "//server/share/a.wav"
+    assert u("file:///Volumes/Media/a.wav") == "/Volumes/Media/a.wav"
+    assert u("D:\\a.wav") == "D:\\a.wav"

@@ -4,29 +4,15 @@ from __future__ import annotations
 import os
 import re
 from fractions import Fraction
-from urllib.parse import unquote, urlparse
 
 from lxml import etree
 
+from ..paths import url_to_path
 from ..model import Clip, Marker, Timeline, Track, VolumePoint
 from ..timecode import parse_fcp_time as T
 
 CLIP_TAGS = {"asset-clip", "clip", "audio", "video", "gap", "ref-clip",
              "sync-clip", "mc-clip", "title", "transition"}
-
-
-def url_to_path(src: str) -> str:
-    if not src:
-        return ""
-    if not src.lower().startswith("file:"):
-        return unquote(src)
-    u = urlparse(src)
-    p = unquote(u.path)
-    if u.netloc and u.netloc.lower() not in ("", "localhost"):
-        return "//" + u.netloc + p          # UNC share
-    if re.match(r"^/[A-Za-z]:", p):           # /D:/folder -> D:/folder
-        p = p[1:]
-    return p
 
 
 def _db(s: str | None) -> float:

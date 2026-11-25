@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import os
 from fractions import Fraction
-from urllib.parse import unquote, urlparse
 
 import aaf2
 
 from ..model import Clip, Marker, Timeline, Track, VolumePoint
+from ..paths import url_to_path as _url_to_path
 from ..timecode import lin_to_db
 
 EMBEDDED = "aaf-embedded://"
@@ -15,20 +15,6 @@ EMBEDDED = "aaf-embedded://"
 
 def _rate(r) -> Fraction:
     return Fraction(r.numerator, r.denominator) if hasattr(r, "numerator") else Fraction(r)
-
-
-def _url_to_path(url: str) -> str:
-    if not url:
-        return ""
-    if url.lower().startswith("file:"):
-        u = urlparse(url)
-        p = unquote(u.path)
-        if u.netloc and u.netloc.lower() not in ("", "localhost"):
-            return "//" + u.netloc + p
-        if len(p) > 2 and p[0] == "/" and p[2] == ":":
-            p = p[1:]
-        return p
-    return unquote(url)
 
 
 def _locators(mob):
