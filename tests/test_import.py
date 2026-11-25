@@ -1,0 +1,127 @@
+"""End-to-end import tests. Run:  python -m pytest tests  (needs ffmpeg)."""
+import gzip
+import os
+import sys
+import tempfile
+from fractions import Fraction
+
+import pytest
+from lxml import etree
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from bridge import importer, timecode as tc          # noqa: E402
+from bridge.sidecar import Sidecar                     # noqa: E402
+from tests import fixtures as fx                       # noqa: E402
+
+FR = Fraction(24000, 1001)
+
+
+@pytest.fixture(scope="module")
+def env():
+    d = tempfile.mkdtemp(prefix="bridge-test-")
+    cam, sfx = fx.media(os.path.join(d, "media"))
+    return dict(d=d, cam=cam, sfx=sfx, fcp=fx.fcpxml(d, cam, sfx),
+                aaf=fx.aaf(d, cam, sfx), tpl=fx.template(d))
+
+
+def frames(n):
+    return Fraction(n) / FR
+
+
+def test_timecode_roundtrip():
+    for rate, drop in [(FR, False), (Fraction(25), False), (Fraction(30000, 1001), True)]:
+        for tcs in ["01:00:00:00", "00:59:58:00", "10:23:45:12"]:
+            if drop:
+                tcs = tcs.replace(":", ";", 2)[:-3] + ";" + tcs[-2:]
+            s = tc.tc_to_seconds(tcs, rate, drop)
+            assert tc.seconds_to_tc(s, rate, drop).replace(";", ":") == tcs.replace(";", ":")
+    assert tc.tc_to_frames("00:10:00;00", Fraction(30000, 1001), True) == 17982
+
+
+def test_fcpxml_read(env):
+    tl = importer.load(env["fcp"])
+    assert tl.frame_rate == FR
+    assert tl.start == frames(86400)                    # 01:00:00:00
+    names = [t.name for t in tl.audio_tracks]
+    # the video clip's own audio is dropped: the same media sits on lane -1
+    assert names == ["A1", "A2", "A3"], names
+    a2 = tl.audio_tracks[0]
+    c = a2.clips[0]
+    assert c.channels == [1, 2]
+    assert c.start == frames(86400)
+    assert c.source_in == frames(24)
+    assert c.gain_db == -3.0
+    assert c.fade_in == frames(12) and c.fade_out == frames(24)
+    w = tl.audio_tracks[2].clips[0]
+    assert w.start == frames(86640 + 24)
+    assert [p.db for p in w.volume] == [-12.0, 0.0]
+    assert w.volume[0].time == 0
+    assert tl.markers[0].time == frames(86424) and tl.markers[0].name == "Door slam"
+
+
+def _als(path):
+    with gzip.open(path) as fh:
+        return etree.fromstring(fh.read())
+
+
+def test_fcpxml_to_live(env):
+    out = os.path.join(env["d"], "out")
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=out, tempo=120.0,
+        selected=["A1", "A2", "A3"], picture=env["cam"]))
+    root = _als(res.als_path)
+    tracks = root.findall("LiveSet/Tracks/AudioTrack")
+    names = [t.find("Name/EffectiveName").get("Value") for t in tracks]
+    assert names == ["PICTURE", "ORIG - A1", "ORIG - A2", "ORIG - A3"]
+    assert root.find("LiveSet/Tracks/ReturnTrack") is not None
+    # unique pointee ids
+    ids = [e.get("Id") for e in root.iter() if e.tag.endswith("Target") and e.get("Id")]
+    assert len(ids) == len(set(ids))
+    assert int(root.find("LiveSet/NextPointeeId").get("Value")) > max(map(int, ids))
+    # clip on A2 starts at Live 0, plays source from 1 frame*24 in
+    clip = tracks[1].find(".//Events/AudioClip")
+    assert float(clip.get("Time")) == 0.0
+    assert abs(float(clip.find("Loop/LoopStart").get("Value")) - float(frames(24))) < 1e-9
+    assert clip.find("IsWarped").get("Value") == "false"
+    assert abs(float(clip.find("SampleVolume").get("Value")) - tc.db_to_lin(-3)) < 1e-6
+    wav = clip.find("SampleRef/FileRef/Path").get("Value")
+    assert wav.endswith("_ch1-2.wav") and os.path.exists(wav)
+    # whoosh: 264 frames after 01:00:00:00 -> beats at 120 BPM
+    wclip = tracks[3].find(".//Events/AudioClip")
+    assert abs(float(wclip.get("Time")) - float(frames(264)) * 2) < 1e-9
+    env_ = tracks[3].find("AutomationEnvelopes/Envelopes/AutomationEnvelope")
+    vol_id = tracks[3].find(".//Mixer/Volume/AutomationTarget").get("Id")
+    assert env_.find("EnvelopeTarget/PointeeId").get("Value") == vol_id
+    # tempo + locator
+    assert root.find("LiveSet/MainTrack/DeviceChain/Mixer/Tempo/Manual").get("Value") == "120.0"
+    loc = root.find("LiveSet/Locators/Locators/Locator")
+    assert loc.find("Name").get("Value") == "Door slam"
+    assert abs(float(loc.find("Time").get("Value")) - float(frames(24)) * 2) < 1e-9
+    side = Sidecar.load(Sidecar.path_for(res.als_path))
+    assert side.offset_s == frames(86400) and side.is_original(wav)
+
+
+def test_offset_preroll(env):
+    out = os.path.join(env["d"], "out2")
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=out, tempo=100.0, offset_tc="00:59:58:00",
+        selected=["A1"], set_name="preroll"))
+    clip = _als(res.als_path).find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
+    assert abs(float(clip.get("Time")) - float(frames(48)) * 100 / 60) < 1e-9
+
+
+def test_aaf_read_and_import(env):
+    tl = importer.load(env["aaf"])
+    assert tl.start == frames(86400)
+    names = [t.name for t in tl.audio_tracks]
+    assert names == ["A1", "SFX"], names                # A1/A2 mono pair merged to stereo
+    a1 = tl.audio_tracks[0].clips[0]
+    assert a1.channels == [1, 2] and a1.start == frames(86424)
+    assert a1.source_in == frames(24)
+    sfx = tl.audio_tracks[1].clips[0]
+    assert abs(sfx.gain_db - (-6.0206)) < 0.01
+    assert sfx.source_in == frames(48)
+    res = importer.run(env["aaf"], importer.ImportOptions(
+        template=env["tpl"], out_dir=os.path.join(env["d"], "out3")))
+    assert not [w for w in res.warnings if "offline" in w.lower()], res.warnings
