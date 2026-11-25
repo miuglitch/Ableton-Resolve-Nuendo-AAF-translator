@@ -11,10 +11,14 @@ Round-trips timelines between **DaVinci Resolve** (hub), **Ableton Live 12/13**
 
 ## Getting the app
 
-Each push builds a Windows app automatically:
-GitHub → **Actions** → latest "Build Windows app" run → download
-**MIUGLITCH-AAF-Translator-windows**. Unzip it and run
-`MIUGLITCH AAF Translator.exe`. ffmpeg is included.
+Ready-to-run builds live in `OUTPUT\`:
+```
+OUTPUT\ffmpeg\              shared by every version (delivered in pieces; the app
+                              joins them into ffmpeg.exe/ffprobe.exe on first use)
+OUTPUT\v0.2.0\MIUGLITCH AAF Translator.exe
+```
+Each new version gets its own folder (~17 MB). Old version folders can be deleted.
+Every push also publishes the exe as a GitHub release (vX.Y.Z).
 
 ## One-time step: make the Live template
 
@@ -42,8 +46,12 @@ markers) or **AAF** (Fairlight export, linked media).
    01:00:00:00). Set e.g. `00:59:58:00` for two seconds of pre-roll.
 4. **Tempo:** any value, but keep it constant in the set; tempo changes would
    move audio against picture.
-5. Optional **picture reference** (an H.264 .mov/.mp4 export from Resolve) and
-   its start timecode. It lands on a `PICTURE` track.
+5. Optional **picture reference**. Its start timecode is read from the file
+   (or typed in). Tick *Transcode picture for Live* to convert it first:
+   codec (H.264 .mp4/.mov, ProRes Proxy/LT, DNxHR LB .mov/.mxf, MJPEG),
+   frame rate, resolution, keyframe interval (1 = every frame, best for
+   scrubbing), keep audio, burn-in timecode. It lands on a `PICTURE` track.
+   The *Picture transcode* tab does the same for any video file.
 6. **Create Live Set.**
 
 Result, in the folder you chose:
