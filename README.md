@@ -55,6 +55,17 @@ markers) or **AAF** (Fairlight export, linked media).
    The *Picture transcode* tab does the same for any video file.
 7. **Create Live Set.**
 
+**Video** (the *Video* card)
+- *Timeline's video clips on their own tracks*: each video clip from Resolve is cut
+  out with 1 s handles, converted to the format chosen below (H.264 all-intra
+  scrubs best) and placed on a `VIDEO V1`, `VIDEO V2`… track, so you can select and
+  loop a shot. Files go to `Samples\Video`.
+- *Locator at every video clip*: a locator at each cut, named after the clip.
+- For timelines with video, export **FCPXML** from Resolve: its AAF export re-renders
+  everything to DNx MXF, which can change resolution and frame rate.
+- Track colours: audio from Resolve = sky blue, video clips = violet,
+  picture reference = grey.
+
 **Destination**
 - *New Live project*: by default a **neighbour folder**: the project is created next
   to the folder the AAF is in (source and working folders stay separate). Untick to

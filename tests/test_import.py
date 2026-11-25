@@ -371,3 +371,27 @@ def test_fader_not_folded_by_default(env, tmp_path):
             out_dir=str(tmp_path / f"e{fader}"), include_fader=fader, log=lambda m: None))
         c = read_fcp(out.path).audio_tracks[0].clips[0]
         assert c.gain_db == pytest.approx(want, abs=0.01)
+
+
+def test_video_clips_and_markers(env, tmp_path):
+    from bridge import video, media
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path), selected=["A1"], video_markers=True,
+        video_clips=video.VideoSettings(resolution="360p", codec="H.264 (.mov)")))
+    root = _als(res.als_path)
+    tracks = root.findall("LiveSet/Tracks/AudioTrack")
+    names = [t.find("Name/EffectiveName").get("Value") for t in tracks]
+    assert names[0] == "VIDEO V1" and names[1] == "ORIG - A1"
+    assert tracks[0].find("Color").get("Value") == "24" and tracks[1].find("Color").get("Value") == "8"
+    clip = tracks[0].find(".//Events/AudioClip")
+    path = clip.find("SampleRef/FileRef/Path").get("Value")
+    assert "Samples/Video/V1_001_A001_C003 cam" in path.replace("\\", "/") and path.endswith(".mov")
+    assert float(clip.get("Time")) == 0.0
+    assert abs(float(clip.find("Loop/LoopStart").get("Value")) - 1.0) < 1e-6      # 1 s handle
+    info = media.probe(path)
+    kinds = sorted(s["codec_type"] for s in info["streams"])
+    assert kinds == ["audio", "video"], kinds
+    assert 11.5 < float(info["format"]["duration"]) < 12.5                       # 10 s + 2 × 1 s
+    locs = [(l.find("Name").get("Value"), float(l.find("Time").get("Value")))
+            for l in root.findall("LiveSet/Locators/Locators/Locator")]
+    assert ("A001_C003 cam", 0.0) in locs and any(n == "Door slam" for n, _ in locs)

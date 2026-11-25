@@ -125,6 +125,29 @@ def build_command(src: str, dst: str, s: VideoSettings) -> list[str]:
     return cmd
 
 
+def transcode_segment(src: str, dst: str, start: float, duration: float, s: VideoSettings) -> str:
+    """Transcode part of a file (for video clips in Live). A silent audio track
+    is added because Live loads video files as audio clips."""
+    cmd = build_command(src, dst, s)
+    if "-timecode" in cmd:                                    # source TC would be wrong here
+        k = cmd.index("-timecode")
+        del cmd[k:k + 2]
+    cmd[-1:-1] = ["-map_metadata", "-1"] + (["-write_tmcd", "0"] if dst.endswith(".mov") else [])
+    i = cmd.index("-i")
+    cmd[i:i] = ["-ss", f"{max(start, 0):.6f}"]                 # fast seek before the input
+    j = cmd.index("-i") + 2
+    cmd[j:j] = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", f"{duration:.6f}"]
+    # replace '-an' / audio mapping with the silent track
+    if "-an" in cmd:
+        k = cmd.index("-an")
+        cmd[k:k + 1] = ["-map", "1:a:0", "-c:a", "pcm_s16le" if dst.endswith((".mov", ".mxf")) else "aac",
+                        "-shortest"]
+    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError(f"Video transcode failed: {r.stderr.strip()[-600:]}")
+    return dst
+
+
 def transcode(src: str, out_dir: str, s: VideoSettings, log=print) -> str:
     os.makedirs(out_dir, exist_ok=True)
     dst = output_name(src, out_dir, s)

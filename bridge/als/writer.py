@@ -62,7 +62,12 @@ BUILTIN_CLIP = """<AudioClip Id="0" Time="0">
 <SavedWarpMarkersForStretched/><MarkersGenerated Value="false"/><IsSongTempoLeader Value="false"/>
 </AudioClip>"""
 
-LIVE_COLORS = {"ORIG": 13, "SD": 2, "PICTURE": 25, None: 13}
+# Live's colour palette index (0-69). One colour per kind of track.
+LIVE_COLORS = {"ORIG": 8,       # audio from Resolve: sky blue
+               "VIDEO": 24,     # video clips: violet
+               "PICTURE": 27,   # picture reference: grey
+               "SD": 2,         # new sound design (not set by the app)
+               None: 8}
 
 
 def load_als(path: str) -> etree._ElementTree:

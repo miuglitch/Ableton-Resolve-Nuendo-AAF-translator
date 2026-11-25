@@ -423,20 +423,30 @@ class App(Base):
         self._list_h = 40
         self.after(50, self._fit_list)
 
-        pc = Card(page, "Picture reference (optional)")
+        pc = Card(page, "Video")
         pc.grid(row=5, column=0, sticky="ew", pady=(0, 10))
-        self._file_row(pc, 1, "Video file", self.v_pic,
+        self.v_vclips = tk.BooleanVar(value=s.get("video_clips", True))
+        self.v_vmarks = tk.BooleanVar(value=s.get("video_markers", True))
+        vrow = ctk.CTkFrame(pc, fg_color="transparent")
+        vrow.grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(2, 4))
+        check(vrow, "Timeline's video clips on their own tracks", self.v_vclips).pack(side="left", padx=(0, 18))
+        check(vrow, "Locator at every video clip, named after it", self.v_vmarks).pack(side="left")
+        self.vinfo = label(pc, "")
+        self.vinfo.grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 2))
+        label(pc, "Optional picture reference (one rendered file):").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 0))
+        self._file_row(pc, 4, "Video file", self.v_pic,
                        lambda: self._pick(self.v_pic, [("Video", "*.mov *.mp4 *.m4v *.mxf"),
                                                        ("All", "*.*")]), "picture")
-        label(pc, "Start timecode").grid(row=2, column=0, sticky="w", padx=(14, 10), pady=4)
+        label(pc, "Start timecode").grid(row=5, column=0, sticky="w", padx=(14, 10), pady=4)
         tcrow = ctk.CTkFrame(pc, fg_color="transparent")
-        tcrow.grid(row=2, column=1, sticky="w")
+        tcrow.grid(row=5, column=1, sticky="w")
         entry(tcrow, self.v_pic_tc, 130).pack(side="left")
         label(tcrow, "  blank = read from the file").pack(side="left")
-        check(pc, "Transcode picture for Live", self.v_pic_conv).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 8))
-        self.pic_panel = VideoPanel(pc, "Picture format", s, "picture_video")
-        self.pic_panel.grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
+        check(pc, "Transcode the picture reference (video clips are always transcoded)", self.v_pic_conv).grid(
+            row=6, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 8))
+        self.pic_panel = VideoPanel(pc, "Format for Live (video clips and picture reference)", s, "picture_video")
+        self.pic_panel.grid(row=7, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
 
         run = ctk.CTkFrame(page, fg_color="transparent")
         run.grid(row=6, column=0, sticky="ew", pady=(4, 6))
@@ -496,7 +506,10 @@ class App(Base):
         if self.v_next.get():
             self.v_out.set(self._neighbour_dir())
         self.after(30, self._fit_list)
-        self._log(f"Loaded {os.path.basename(p)}: {len(tl.audio_tracks)} audio tracks")
+        nv = sum(len(t.clips) for t in tl.tracks if t.kind == "video")
+        self.vinfo.configure(text=f"{nv} video clip{'s' if nv != 1 else ''} in this timeline",
+                             text_color=TEXT if nv else DIM)
+        self._log(f"Loaded {os.path.basename(p)}: {len(tl.audio_tracks)} audio tracks, {nv} video clips")
         for w in tl.warnings:
             self._log("! " + w)
 
@@ -656,7 +669,8 @@ class App(Base):
         if not self.v_next.get():
             self.settings["out_dir"] = self.v_out.get()
         self.settings.update(template=self.v_tpl.get(), neighbour_folder=self.v_next.get(), tempo=tempo,
-                             picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()))
+                             picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()),
+                             video_clips=self.v_vclips.get(), video_markers=self.v_vmarks.get())
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
@@ -665,6 +679,8 @@ class App(Base):
             base_set=self._base_path() if adding else None, note=self.v_note.get(),
             picture=self.v_pic.get() or None, picture_tc=self.v_pic_tc.get() or None,
             picture_video=self.pic_panel.get() if self.v_pic_conv.get() else None,
+            video_clips=self.pic_panel.get() if self.v_vclips.get() else None,
+            video_markers=self.v_vmarks.get(),
             log=lambda m: self.after(0, self._log, m),
             progress=lambda i, n: self.after(0, self.bar.set, (i + 1) / max(n, 1)))
         save_settings(self.settings)

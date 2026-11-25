@@ -29,6 +29,9 @@ class ImportOptions:
     picture: str | None = None          # optional reference video for Live
     picture_tc: str | None = None       # timecode of the video's first frame; None = timeline start
     picture_video: object = None        # video.VideoSettings to transcode the picture; None = use as is
+    video_markers: bool = False         # a locator at every video clip start, named after the clip
+    video_clips: object = None          # video.VideoSettings: put Resolve's video clips on Live tracks
+    video_handles: float = 1.0          # seconds kept before/after each video clip
     prefix: str = ORIG_PREFIX
     sample_rate: int = 48000           # rate of the converted WAVs = your Live audio rate
     # add to an existing Live project instead of creating a new one
@@ -162,6 +165,37 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
         except Exception as e:
             warnings.append(f"Picture reference not added: {e}")
 
+    video_tracks = [t for t in tl.tracks if t.kind == "video" and t.clips]
+    if opt.video_clips is not None and video_tracks:
+        from .video import transcode_segment, CODECS
+        vdir = os.path.join(project_dir, "Samples", "Video")
+        os.makedirs(vdir, exist_ok=True)
+        ext = CODECS[opt.video_clips.codec][0]
+        for vt in reversed(video_tracks):                # V2 above V1, like Resolve
+            clips = []
+            for i, c in enumerate(vt.clips, start=1):
+                if not os.path.exists(c.source_path):
+                    warnings.append(f"Video file not found: {c.source_path}")
+                    continue
+                pre = min(Fraction(str(opt.video_handles)), c.source_in)
+                seg_start = c.source_in - pre
+                seg_len = c.duration + pre + Fraction(str(opt.video_handles))
+                base = re.sub(r'[<>:"/\\|?*]', "_", os.path.splitext(c.name or os.path.basename(c.source_path))[0])
+                dst = os.path.join(vdir, f"{vt.name}_{i:03d}_{base}{ext}")
+                try:
+                    if not os.path.exists(dst):
+                        log(f"Video clip {i}/{len(vt.clips)} on {vt.name}: {c.name}")
+                        transcode_segment(c.source_path, dst, float(seg_start), float(seg_len), opt.video_clips)
+                except Exception as e:
+                    warnings.append(f"{vt.name} / {c.name}: {e}")
+                    continue
+                vc = Clip(name=c.name, start=c.start, duration=c.duration, source_path=dst,
+                          source_in=pre, enabled=c.enabled)
+                vc.wav_path = dst
+                clips.append(vc)
+            if clips:
+                b.add_track(f"VIDEO {vt.name}", clips, offset, LIVE_COLORS["VIDEO"], warnings)
+
     for t in tl.audio_tracks:
         if not t.selected:
             continue
@@ -170,6 +204,15 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
     for i, m in enumerate(tl.markers):
         if m.time >= offset:
             b.add_locator(m.time - offset, m.name or m.note or f"Marker {i + 1}", i)
+    if opt.video_markers:
+        seen = set()
+        for vt in video_tracks:
+            for c in vt.clips:
+                key = round(float(c.start), 4)
+                if c.start >= offset and key not in seen:
+                    seen.add(key)
+                    nm = os.path.splitext(c.name or os.path.basename(c.source_path))[0]
+                    b.add_locator(c.start - offset, nm, 0)
 
     b.save(als_path)
     if not opt.existing_project:
