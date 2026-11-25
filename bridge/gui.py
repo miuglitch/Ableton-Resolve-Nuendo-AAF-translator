@@ -47,6 +47,14 @@ TIMELINE_EXT = {".aaf", ".fcpxml", ".fcpxmld", ".xml"}
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".mxf", ".avi", ".mkv"}
 
 
+def newest_set(folder: str) -> str | None:
+    """Newest .als directly in a folder (Live's Backup folder is ignored)."""
+    if not os.path.isdir(folder):
+        return None
+    sets = [os.path.join(folder, n) for n in os.listdir(folder) if n.lower().endswith(".als")]
+    return max(sets, key=os.path.getmtime) if sets else None
+
+
 def load_settings():
     try:
         with open(SETTINGS, encoding="utf-8") as fh:
@@ -257,7 +265,8 @@ class App(Base):
         if self.tabs.get() == "Picture transcode" and not force:
             kind = {"picture": "vin", "folder": "vout"}.get(kind, kind)
         if self.tabs.get() == "Live → Resolve / Nuendo" and not force:
-            kind = {"template": "xset", "folder": "xout"}.get(kind, kind)
+            kind = {"template": "xset",
+                    "folder": "xset" if newest_set(path) else "xout"}.get(kind, kind)
         if kind == "xset":
             return self._load_set(path)
         if kind == "xout":
@@ -798,6 +807,12 @@ class App(Base):
     def _load_set(self, p):
         if not p:
             return
+        if os.path.isdir(p):                       # a Live project folder was dropped
+            found = newest_set(p)
+            if not found:
+                return self._xsay(f"! No Live Set (.als) in {p}")
+            self._xsay(f"Using the newest set in that folder: {os.path.basename(found)}")
+            p = found
         self.vx_set.set(p)
         try:
             pre = exporter.preflight(p)
