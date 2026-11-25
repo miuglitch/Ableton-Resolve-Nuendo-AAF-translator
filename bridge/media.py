@@ -21,20 +21,53 @@ from .timecode import SAMPLE_RATE, tc_to_seconds
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
+def _search_dirs():
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = []
+    for r in (exe_dir, os.path.dirname(exe_dir), getattr(sys, "_MEIPASS", ""),
+              here, os.path.dirname(here)):
+        if r:
+            dirs += [r, os.path.join(r, "ffmpeg"), os.path.join(r, "ffmpeg", "bin")]
+    return dirs
+
+
+def _join_parts(target: str) -> bool:
+    """ffmpeg is delivered in <25 MB pieces (name.exe.001, .002, …).
+    Join them into the real .exe the first time it's needed."""
+    parts = []
+    i = 1
+    while os.path.exists(f"{target}.{i:03d}"):
+        parts.append(f"{target}.{i:03d}")
+        i += 1
+    if not parts:
+        return False
+    tmp = target + ".joining"
+    with open(tmp, "wb") as out:
+        for p in parts:
+            with open(p, "rb") as fh:
+                shutil.copyfileobj(fh, out, 4 << 20)
+    os.replace(tmp, target)
+    for p in parts:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return True
+
+
 def tool(name: str) -> str:
-    """ffmpeg/ffprobe: next to the .exe, in ./ffmpeg, or on PATH."""
+    """ffmpeg/ffprobe: next to the .exe, in a sibling 'ffmpeg' folder, or on PATH."""
     exe = name + (".exe" if sys.platform == "win32" else "")
-    roots = [os.path.dirname(sys.executable), os.path.dirname(os.path.abspath(__file__)),
-             os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."),
-             getattr(sys, "_MEIPASS", "")]
-    for r in roots:
-        for sub in ("", "ffmpeg", os.path.join("ffmpeg", "bin")):
-            p = os.path.join(r, sub, exe)
-            if r and os.path.isfile(p):
-                return p
+    for d in _search_dirs():
+        p = os.path.join(d, exe)
+        if os.path.isfile(p):
+            return p
+        if _join_parts(p):
+            return p
     found = shutil.which(name)
     if not found:
-        raise FileNotFoundError(f"{name} not found. Put ffmpeg next to the app or on PATH.")
+        raise FileNotFoundError(f"{name} not found. Put the 'ffmpeg' folder next to the app.")
     return found
 
 

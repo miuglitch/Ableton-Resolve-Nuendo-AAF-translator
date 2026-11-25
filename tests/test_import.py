@@ -136,3 +136,35 @@ def test_url_spellings():
     assert u("file://server/share/a.wav") == "//server/share/a.wav"
     assert u("file:///Volumes/Media/a.wav") == "/Volumes/Media/a.wav"
     assert u("D:\\a.wav") == "D:\\a.wav"
+
+
+def test_ffmpeg_parts_join(tmp_path):
+    from bridge.media import _join_parts
+    target = tmp_path / "ffmpeg.exe"
+    (tmp_path / "ffmpeg.exe.001").write_bytes(b"abc")
+    (tmp_path / "ffmpeg.exe.002").write_bytes(b"def")
+    assert _join_parts(str(target))
+    assert target.read_bytes() == b"abcdef"
+    assert not (tmp_path / "ffmpeg.exe.001").exists()
+
+
+@pytest.mark.parametrize("codec", ["H.264 (.mp4)", "ProRes 422 Proxy (.mov)", "DNxHR LB (.mxf)"])
+def test_picture_transcode(env, codec):
+    from bridge import video, media
+    s = video.VideoSettings(codec=codec, frame_rate="25", resolution="640x360",
+                            keyframe_interval=1)
+    out = video.transcode(env["cam"], os.path.join(env["d"], "pic"), s, log=lambda m: None)
+    v = next(x for x in media.probe(out)["streams"] if x["codec_type"] == "video")
+    assert (v["width"], v["height"], v["r_frame_rate"]) == (640, 360, "25/1")
+
+
+def test_import_with_picture_transcode(env):
+    from bridge import video
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=os.path.join(env["d"], "out4"), selected=["A1"],
+        picture=env["cam"], picture_video=video.VideoSettings(resolution="640x360")))
+    root = _als(res.als_path)
+    pic = root.find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
+    assert pic.find("SampleRef/FileRef/Path").get("Value").endswith("_picture.mp4")
+    # picture has TC 10:00:00:00, timeline starts 01:00:00:00 -> 9 h later in Live
+    assert float(pic.get("Time")) > 9 * 3600 * 2 - 100

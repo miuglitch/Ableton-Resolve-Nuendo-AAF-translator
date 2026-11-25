@@ -8,7 +8,7 @@ from fractions import Fraction
 
 from . import sidecar as sc
 from .als.writer import AlsBuilder, LIVE_COLORS
-from .media import MediaConverter, probe
+from .media import MediaConverter, probe, source_timecode
 from .model import Clip, Timeline
 from .readers import read_timeline
 from .timecode import seconds_to_tc, tc_to_seconds
@@ -26,6 +26,7 @@ class ImportOptions:
     selected: list[str] | None = None   # track names to include; None = all
     picture: str | None = None          # optional reference video for Live
     picture_tc: str | None = None       # timecode of the video's first frame; None = timeline start
+    picture_video: object = None        # video.VideoSettings to transcode the picture; None = use as is
     prefix: str = ORIG_PREFIX
     log: callable = print
     progress: callable = None
@@ -74,12 +75,21 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
 
     if opt.picture:
         try:
-            pic_start = (tc_to_seconds(opt.picture_tc, tl.frame_rate, tl.drop_frame)
-                         if opt.picture_tc else tl.start)
-            dur = Fraction(str(float(probe(opt.picture)["format"]["duration"])))
-            pic = Clip(name=os.path.basename(opt.picture), start=pic_start, duration=dur,
-                       source_path=opt.picture, source_in=Fraction(0))
-            pic.wav_path = opt.picture
+            pic_file = opt.picture
+            info = probe(pic_file)
+            pic_tc = opt.picture_tc or source_timecode(info)
+            pic_start = (tc_to_seconds(pic_tc, tl.frame_rate, tl.drop_frame)
+                         if pic_tc else tl.start)
+            log(f"Picture starts at {seconds_to_tc(pic_start, tl.frame_rate, tl.drop_frame)}"
+                f"{' (from the file)' if not opt.picture_tc and pic_tc else ''}")
+            if opt.picture_video is not None:
+                from .video import transcode
+                pic_file = transcode(pic_file, os.path.join(project_dir, "Media", "Picture"),
+                                     opt.picture_video, log)
+            dur = Fraction(str(float(probe(pic_file)["format"]["duration"])))
+            pic = Clip(name=os.path.basename(pic_file), start=pic_start, duration=dur,
+                       source_path=pic_file, source_in=Fraction(0))
+            pic.wav_path = pic_file
             b.add_track("PICTURE", [pic], offset, LIVE_COLORS["PICTURE"], warnings)
         except Exception as e:
             warnings.append(f"Picture reference not added: {e}")
