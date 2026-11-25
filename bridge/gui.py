@@ -42,6 +42,7 @@ HOVER = "#f0f0f2"
 DROP = "#36363a"
 FONT = "Segoe UI"
 
+NEW_TRACKS_ONLY = "New tracks only (template)"
 TIMELINE_EXT = {".aaf", ".fcpxml", ".fcpxmld", ".xml"}
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".mxf", ".avi", ".mkv"}
 
@@ -120,7 +121,11 @@ class VideoPanel(Card):
         self.settings, self.key = settings, key
         self.v_codec = tk.StringVar(value=d.get("codec", "H.264 (.mp4)"))
         self.v_rate = tk.StringVar(value=d.get("frame_rate", "Same as source"))
-        self.v_res = tk.StringVar(value=d.get("resolution", "1280x720"))
+        res = d.get("resolution", "720p")
+        if res not in video.RESOLUTIONS:
+            h = video._height(res)
+            res = f"{h}p" if h and f"{h}p" in video.RESOLUTIONS else "720p"
+        self.v_res = tk.StringVar(value=res)
         self.v_gop = tk.StringVar(value=str(d.get("keyframe_interval", 1)))
         self.v_audio = tk.BooleanVar(value=d.get("keep_audio", False))
         self.v_tc = tk.BooleanVar(value=d.get("burn_timecode", False))
@@ -258,6 +263,14 @@ class App(Base):
             self.v_tpl.set(path)
         elif kind == "picture":
             self.v_pic.set(path)
+        elif kind == "folder" and self.v_mode.get() == "Add to existing project":
+            self.v_proj.set(path if os.path.isdir(path) else os.path.dirname(path))
+        elif kind == "project":
+            if path.lower().endswith(".als"):
+                self.v_proj.set(os.path.dirname(path))
+                self.v_base.set(os.path.basename(path))
+            else:
+                self.v_proj.set(path if os.path.isdir(path) else os.path.dirname(path))
         elif kind == "folder":
             self.v_next.set(False)
             self._toggle_next()
@@ -290,7 +303,11 @@ class App(Base):
         self.v_tpl = tk.StringVar(value=s.get("template", ""))
         self.v_out = tk.StringVar(value=s.get("out_dir", ""))
         self.custom_out = s.get("out_dir", "")
-        self.v_next = tk.BooleanVar(value=s.get("save_next_to_timeline", True))
+        self.v_next = tk.BooleanVar(value=s.get("neighbour_folder", True))
+        self.v_mode = tk.StringVar(value="New Live project")
+        self.v_proj = tk.StringVar()
+        self.v_base = tk.StringVar(value=NEW_TRACKS_ONLY)
+        self.v_note = tk.StringVar()
         self.v_name = tk.StringVar()
         self.v_tempo = tk.StringVar(value=str(s.get("tempo", 120)))
         self.v_sr = tk.StringVar(value=str(s.get("sample_rate", 48000)))
@@ -308,35 +325,69 @@ class App(Base):
 
         files = Card(page, "Files")
         files.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        self._file_row(files, 1, "Timeline", self.v_in, self._pick_input, "timeline")
+        self._file_row(files, 1, "Timeline (AAF)", self.v_in, self._pick_input, "timeline")
         self._file_row(files, 2, "Live template", self.v_tpl,
                        lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), "template")
-        self.out_entry = self._file_row(files, 3, "Save project in", self.v_out, self._pick_out, "folder")
-        check(files, "Next to the timeline file", self.v_next).grid(
-            row=4, column=1, sticky="w", pady=(2, 2))
+        ctk.CTkFrame(files, height=8, width=1, fg_color="transparent").grid(row=3, column=0)
+
+        dest = Card(page, "Destination")
+        dest.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ctk.CTkSegmentedButton(dest, values=["New Live project", "Add to existing project"],
+                               variable=self.v_mode, command=lambda v: self._mode_changed(),
+                               font=f(12, "bold"), fg_color=FIELD, selected_color="#5a5a60",
+                               selected_hover_color="#66666c", unselected_color=FIELD,
+                               unselected_hover_color=LINE, text_color=TEXT, corner_radius=6
+                               ).grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 8))
+        self.seg_dest = dest.winfo_children()[-1]
+
+        self.new_fr = ctk.CTkFrame(dest, fg_color="transparent")
+        self.new_fr.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.new_fr.columnconfigure(1, weight=1)
+        self.out_entry = self._file_row(self.new_fr, 0, "Save project in", self.v_out, self._pick_out, "folder")
+        check(self.new_fr, "Neighbour folder: next to the timeline's folder", self.v_next).grid(
+            row=1, column=1, sticky="w", pady=(2, 2))
         self.v_next.trace_add("write", lambda *a: self._toggle_next())
-        self.preview = ctk.CTkLabel(files, text="", font=f(11), text_color=DIM, anchor="w",
-                                    justify="left", wraplength=640)
-        self.preview.grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 10))
-        for v in (self.v_out, self.v_name, self.v_in):
+
+        self.add_fr = ctk.CTkFrame(dest, fg_color="transparent")
+        self.add_fr.columnconfigure(1, weight=1)
+        self._file_row(self.add_fr, 0, "Live project", self.v_proj, self._pick_project, "project")
+        label(self.add_fr, "Build on").grid(row=1, column=0, sticky="w", padx=(14, 10), pady=4)
+        self.base_menu = combo(self.add_fr, self.v_base, [NEW_TRACKS_ONLY], 360)
+        self.base_menu.grid(row=1, column=1, sticky="w", pady=4)
+        label(self.add_fr, "Note").grid(row=2, column=0, sticky="w", padx=(14, 10), pady=4)
+        notes = ctk.CTkFrame(self.add_fr, fg_color="transparent")
+        notes.grid(row=2, column=1, sticky="w")
+        entry(notes, self.v_note, 260).pack(side="left")
+        label(notes, "  added to the new set's name, e.g. \"VO pickups\"").pack(side="left")
+        self.v_proj.trace_add("write", lambda *a: self._project_changed())
+
+        self.preview = ctk.CTkLabel(dest, text="", font=f(11), text_color=DIM, anchor="w",
+                                    justify="left", wraplength=700)
+        self.preview.grid(row=3, column=0, columnspan=3, sticky="w", padx=14, pady=(2, 12))
+        for v in (self.v_out, self.v_name, self.v_in, self.v_note, self.v_base):
             v.trace_add("write", lambda *a: self._update_preview())
         self._toggle_next()
 
         st = Card(page, "Session")
-        st.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        st.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         g = ctk.CTkFrame(st, fg_color="transparent")
         g.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 8))
+        self.lockable = []
         for i, (t, w) in enumerate([("Set name", entry(g, self.v_name, 260)),
                                     ("Tempo (BPM)", entry(g, self.v_tempo, 80)),
                                     ("Sample rate (Hz)", combo(g, self.v_sr, [str(r) for r in SAMPLE_RATES], 110)),
                                     ("Live 0:00 = timecode", entry(g, self.v_offset, 130))]):
             label(g, t).grid(row=0, column=i, sticky="w")
             w.grid(row=1, column=i, sticky="w", padx=(0, 14))
+            if i:
+                self.lockable.append(w)
+        self.lock_note = label(st, "")
+        self.lock_note.grid(row=3, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 10))
         self.info = label(st, "Load a timeline to see its tracks.")
         self.info.grid(row=2, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 10))
 
         tr = Card(page, "Tracks to import")
-        tr.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        tr.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         bar = ctk.CTkFrame(tr, fg_color="transparent")
         bar.grid(row=1, column=0, columnspan=4, sticky="w", padx=14)
         button(bar, "Select all", lambda: self._all(True)).pack(side="left", padx=(0, 6))
@@ -358,7 +409,7 @@ class App(Base):
         self.after(50, self._fit_list)
 
         pc = Card(page, "Picture reference (optional)")
-        pc.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        pc.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         self._file_row(pc, 1, "Video file", self.v_pic,
                        lambda: self._pick(self.v_pic, [("Video", "*.mov *.mp4 *.m4v *.mxf"),
                                                        ("All", "*.*")]), "picture")
@@ -373,7 +424,7 @@ class App(Base):
         self.pic_panel.grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
 
         run = ctk.CTkFrame(page, fg_color="transparent")
-        run.grid(row=5, column=0, sticky="ew", pady=(4, 6))
+        run.grid(row=6, column=0, sticky="ew", pady=(4, 6))
         run.columnconfigure(1, weight=1)
         self.go = button(run, "Create Live Set", self._run, primary=True, width=200)
         self.go.grid(row=0, column=0, sticky="w")
@@ -384,7 +435,7 @@ class App(Base):
         self.log = ctk.CTkTextbox(page, height=160, fg_color=PANEL, text_color=TEXT,
                                   border_width=1, border_color=LINE, font=ctk.CTkFont("Consolas", 12),
                                   corner_radius=8)
-        self.log.grid(row=6, column=0, sticky="ew", pady=(6, 4))
+        self.log.grid(row=7, column=0, sticky="ew", pady=(6, 4))
 
     def _pick(self, var, types):
         p = filedialog.askopenfilename(filetypes=types)
@@ -428,40 +479,103 @@ class App(Base):
                 anchor="w", padx=6, pady=3)
             self.track_vars.append((t.name, v))
         if self.v_next.get():
-            self.v_out.set(os.path.dirname(os.path.abspath(p)))
+            self.v_out.set(self._neighbour_dir())
         self.after(30, self._fit_list)
         self._log(f"Loaded {os.path.basename(p)}: {len(tl.audio_tracks)} audio tracks")
         for w in tl.warnings:
             self._log("! " + w)
 
     # -- save location ----------------------------------------------------------
+    def _mode_changed(self):
+        adding = self.v_mode.get() == "Add to existing project"
+        if adding:
+            self.new_fr.grid_remove()
+            self.add_fr.grid(row=2, column=0, columnspan=3, sticky="ew")
+        else:
+            self.add_fr.grid_remove()
+            self.new_fr.grid()
+        self._project_changed()
+
     def _toggle_next(self):
         if not hasattr(self, "out_entry"):
             return
         if self.v_next.get():
-            if self.v_out.get() and self.v_out.get() != self._timeline_dir():
+            if self.v_out.get() and self.v_out.get() != self._neighbour_dir():
                 self.custom_out = self.v_out.get()
-            self.v_out.set(self._timeline_dir())
+            self.v_out.set(self._neighbour_dir())
             self.out_entry.configure(state="disabled", text_color=DIM)
         else:
             self.out_entry.configure(state="normal", text_color=TEXT)
-            if self.v_out.get() == self._timeline_dir():
+            if self.v_out.get() == self._neighbour_dir():
                 self.v_out.set(self.custom_out)
         self._update_preview()
 
-    def _timeline_dir(self):
+    def _neighbour_dir(self):
+        """The folder that holds the timeline's folder: the project becomes a
+        sibling of the export folder, never inside it."""
         p = self.v_in.get()
-        return os.path.dirname(os.path.abspath(p)) if p else ""
+        return os.path.dirname(os.path.dirname(os.path.abspath(p))) if p else ""
+
+    def _pick_project(self):
+        p = filedialog.askdirectory(title="Choose the Live project folder")
+        if p:
+            self.v_proj.set(p)
+
+    def _project_changed(self):
+        """List the project's sets and lock tempo/rate/offset to its earlier import."""
+        proj = self.v_proj.get()
+        adding = self.v_mode.get() == "Add to existing project"
+        sets = []
+        if proj and os.path.isdir(proj):
+            sets = sorted((n for n in os.listdir(proj) if n.lower().endswith(".als")),
+                          key=lambda n: os.path.getmtime(os.path.join(proj, n)), reverse=True)
+        self.base_menu.configure(values=[NEW_TRACKS_ONLY] + sets)
+        if proj != getattr(self, "_last_proj", None) or self.v_base.get() not in [NEW_TRACKS_ONLY] + sets:
+            self.v_base.set(sets[0] if sets else NEW_TRACKS_ONLY)   # newest set by default
+        self._last_proj = proj
+        side = None
+        if adding and proj and os.path.isdir(proj):
+            base = self._base_path()
+            try:
+                side = importer.project_sidecar(proj, base)
+            except Exception:
+                side = None
+        for w in self.lockable:
+            w.configure(state="disabled" if side else "normal",
+                        text_color=DIM if side else TEXT)
+        if side:
+            self.v_tempo.set(f"{side.tempo:g}")
+            self.v_sr.set(str(side.media_sample_rate))
+            self.v_offset.set(seconds_to_tc(side.offset_s, side.rate, side.drop_frame))
+            self.lock_note.configure(text="Tempo, sample rate and offset come from this project's "
+                                          "earlier import, so new audio lines up.")
+        else:
+            self.lock_note.configure(text="")
+        self._update_preview()
+
+    def _base_path(self):
+        b = self.v_base.get()
+        return os.path.join(self.v_proj.get(), b) if b and b != NEW_TRACKS_ONLY else None
 
     def _update_preview(self):
         if not hasattr(self, "preview"):
             return
-        out, name = self.v_out.get(), importer._safe(self.v_name.get() or "Timeline")
-        if not out:
-            self.preview.configure(text="Load a timeline, or untick and choose a folder.")
-            return
-        proj = os.path.join(out, f"{name} Project")
-        self.preview.configure(text=f"Creates  {os.path.normpath(os.path.join(proj, name + '.als'))}")
+        name = self.v_name.get() or "Timeline"
+        if self.v_mode.get() == "Add to existing project":
+            if not self.v_proj.get():
+                return self.preview.configure(text="Choose or drop the Live project folder.")
+            opt = importer.ImportOptions(template="", existing_project=self.v_proj.get(),
+                                         note=self.v_note.get())
+            _, als = importer.target_paths(opt, name)
+            base = self.v_base.get()
+            what = "new tracks only" if base == NEW_TRACKS_ONLY else f"a copy of {base} + new tracks"
+            return self.preview.configure(
+                text=f"Creates  {os.path.normpath(als)}   ({what}; audio goes to Samples\\Imported)")
+        if not self.v_out.get():
+            return self.preview.configure(text="Load a timeline, or untick and choose a folder.")
+        opt = importer.ImportOptions(template="", out_dir=self.v_out.get())
+        _, als = importer.target_paths(opt, name)
+        self.preview.configure(text=f"Creates  {os.path.normpath(als)}")
 
     # -- track list sizing --------------------------------------------------------
     MAX_ROWS = 10
@@ -512,7 +626,10 @@ class App(Base):
             return self._log("! Load or drop an AAF / FCPXML first.")
         if not os.path.isfile(self.v_tpl.get()):
             return self._log("! Pick or drop your Live template set (.als).")
-        if not self.v_out.get():
+        adding = self.v_mode.get() == "Add to existing project"
+        if adding and not os.path.isdir(self.v_proj.get()):
+            return self._log("! Choose or drop the Live project folder to add to.")
+        if not adding and not self.v_out.get():
             return self._log("! Choose or drop the folder to save the project in.")
         selected = [n for n, v in self.track_vars if v.get()]
         if not selected:
@@ -523,12 +640,14 @@ class App(Base):
             return self._log("! Tempo must be a number.")
         if not self.v_next.get():
             self.settings["out_dir"] = self.v_out.get()
-        self.settings.update(template=self.v_tpl.get(), save_next_to_timeline=self.v_next.get(), tempo=tempo,
+        self.settings.update(template=self.v_tpl.get(), neighbour_folder=self.v_next.get(), tempo=tempo,
                              picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()))
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
             sample_rate=int(self.v_sr.get()),
+            existing_project=self.v_proj.get() if adding else None,
+            base_set=self._base_path() if adding else None, note=self.v_note.get(),
             picture=self.v_pic.get() or None, picture_tc=self.v_pic_tc.get() or None,
             picture_video=self.pic_panel.get() if self.v_pic_conv.get() else None,
             log=lambda m: self.after(0, self._log, m),
@@ -541,6 +660,7 @@ class App(Base):
             try:
                 res = importer.run(path, opt, tl=self.tl)
                 self.after(0, self._log, f"✓ Live Set created: {res.als_path}")
+                self.after(0, self._project_changed)
                 self.after(0, self._log, f"  {len(res.warnings)} warning(s), report saved next to the set.")
             except Exception as e:
                 self.after(0, self._log, f"✗ Import failed: {e}")

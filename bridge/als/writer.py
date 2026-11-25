@@ -146,38 +146,61 @@ class TemplateError(RuntimeError):
 
 
 class AlsBuilder:
-    def __init__(self, template_path: str):
-        self.tree = load_als(template_path)
-        self.root = self.tree.getroot()
-        self.liveset = self.root.find("LiveSet")
-        if self.liveset is None:
+    """template_path: Live template (source of the clean audio track/clip).
+    base_path: optional existing Live Set to add to. Its tracks, devices,
+    locators and settings are kept; new tracks are added after its tracks."""
+
+    def __init__(self, template_path: str, base_path: str | None = None):
+        tpl_tree = load_als(template_path)
+        tpl = tpl_tree.getroot().find("LiveSet")
+        if tpl is None:
             raise TemplateError("Template is not a Live Set.")
-        self.tracks_el = self.liveset.find("Tracks")
-        protos = self.tracks_el.findall("AudioTrack")
+        protos = tpl.find("Tracks").findall("AudioTrack")
         if not protos:
             raise TemplateError("Template has no audio track. Save the template with one audio track.")
         self.track_proto = copy.deepcopy(protos[0])
         # Prefer a clip Live wrote itself (Arrangement first, then anywhere in the
-        # set, e.g. Session view); otherwise use the built-in clip definition.
+        # template, e.g. Session view); otherwise use the built-in clip definition.
         clip = protos[0].find(".//MainSequencer/Sample/ArrangerAutomation/Events/AudioClip")
         if clip is None:
-            clip = self.root.find(".//AudioClip")
+            clip = tpl.find(".//AudioClip")
         self.used_builtin_clip = clip is None
         if clip is None:
             clip = etree.fromstring(BUILTIN_CLIP)
         self.clip_proto = copy.deepcopy(clip)
         for slot in self.clip_proto.iter("ClipSlot"):      # never nest session data
             slot.getparent().remove(slot)
-        loc = self.liveset.find("Locators/Locators/Locator")
+        loc = tpl.find("Locators/Locators/Locator")
         self.locator_proto = copy.deepcopy(loc) if loc is not None else None
-        # remove existing audio/MIDI/group tracks; keep returns
-        for t in list(self.tracks_el):
-            if t.tag in ("AudioTrack", "MidiTrack", "GroupTrack"):
-                self.tracks_el.remove(t)
+
+        self.keep_existing = base_path is not None
+        self.tree = load_als(base_path) if base_path else tpl_tree
+        self.root = self.tree.getroot()
+        self.liveset = self.root.find("LiveSet")
+        if self.liveset is None:
+            raise TemplateError(f"{base_path} is not a Live Set.")
+        self.tracks_el = self.liveset.find("Tracks")
         locs = self.liveset.find("Locators/Locators")
-        if locs is not None:
-            for l in list(locs):
-                locs.remove(l)
+        self.existing_locators = set()
+        self.next_locator_id = 0
+        if self.keep_existing:
+            if locs is not None:
+                for l in locs:
+                    try:
+                        self.next_locator_id = max(self.next_locator_id, int(l.get("Id")) + 1)
+                    except (TypeError, ValueError):
+                        pass
+                    t, n = l.find("Time"), l.find("Name")
+                    if t is not None and n is not None:
+                        self.existing_locators.add((round(float(t.get("Value")), 4), n.get("Value")))
+        else:
+            # fresh set: remove template's audio/MIDI/group tracks and locators; keep returns
+            for t in list(self.tracks_el):
+                if t.tag in ("AudioTrack", "MidiTrack", "GroupTrack"):
+                    self.tracks_el.remove(t)
+            if locs is not None:
+                for l in list(locs):
+                    locs.remove(l)
         self.ids = IdAllocator(self.root)
         self.track_ids = set()
         for t in self.tracks_el:
@@ -185,10 +208,22 @@ class AlsBuilder:
                 self.track_ids.add(int(t.get("Id")))
             except (TypeError, ValueError):
                 pass
-        self.insert_at = 0
-        self.tempo = 120.0
+        kids = list(self.tracks_el)
+        first_return = next((i for i, t in enumerate(kids) if t.tag == "ReturnTrack"), len(kids))
+        self.insert_at = first_return if self.keep_existing else 0
+        self.tempo = self.current_tempo() if self.keep_existing else 120.0
 
     # -- set-level -------------------------------------------------------
+    def current_tempo(self) -> float:
+        main = self.liveset.find("MainTrack")
+        if main is None:
+            main = self.liveset.find("MasterTrack")
+        m = main.find(".//Mixer/Tempo/Manual") if main is not None else None
+        try:
+            return float(m.get("Value"))
+        except (AttributeError, TypeError, ValueError):
+            return 120.0
+
     def set_tempo(self, bpm: float):
         self.tempo = bpm
         main = self.liveset.find("MainTrack")
@@ -220,8 +255,12 @@ class AlsBuilder:
             loc = etree.fromstring(
                 '<Locator Id="0"><LomId Value="0"/><Time Value="0"/><Name Value=""/>'
                 '<Annotation Value=""/><IsSongStart Value="false"/></Locator>')
-        loc.set("Id", str(idx))
-        _v(loc, "Time", self.beats(seconds))
+        beats = self.beats(seconds)
+        if (round(beats, 4), name) in self.existing_locators:
+            return                                   # already in the set
+        loc.set("Id", str(self.next_locator_id))
+        self.next_locator_id += 1
+        _v(loc, "Time", beats)
         _v(loc, "Name", name)
         _v(loc, "IsSongStart", False)
         loc.tail = "\n"

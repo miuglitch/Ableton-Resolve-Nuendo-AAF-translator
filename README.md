@@ -54,13 +54,24 @@ markers) or **AAF** (Fairlight export, linked media).
    The *Picture transcode* tab does the same for any video file.
 7. **Create Live Set.**
 
+**Destination**
+- *New Live project*: by default a **neighbour folder**: the project is created next
+  to the folder the AAF is in (source and working folders stay separate). Untick to
+  choose any folder. The new project folder gets the Ableton project icon, copied
+  from the folder your Live template lives in.
+- *Add to existing project*: pick the Live project folder. New audio goes into its
+  `Samples\Imported`, and a new set is saved as `<Name> - <note>.als` (or
+  `- added <date time>` without a note). *Build on* an existing set to keep all its
+  tracks and add the new ones, or *New tracks only*. Tempo, sample rate and offset
+  are taken from the project's earlier import so everything lines up.
+
 Result, in the folder you chose:
 ```
 <Name> Project/
   <Name>.als                 open in Live
   <Name>.bridge.json         remembers offset, tempo, frame rate, media origin (needed for export)
   <Name> - import report.txt what was imported + warnings
-  Media/Imported/*.wav       24-bit WAVs at the rate you pick (44.1–96 kHz), with original timecode (BWF)
+  Samples/Imported/*.wav       24-bit WAVs at the rate you pick (44.1–96 kHz), with original timecode (BWF)
 ```
 
 What comes across: clip positions and trims, clip gain, fades, volume

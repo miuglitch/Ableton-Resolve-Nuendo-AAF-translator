@@ -151,7 +151,7 @@ def test_ffmpeg_parts_join(tmp_path):
 @pytest.mark.parametrize("codec", ["H.264 (.mp4)", "ProRes 422 Proxy (.mov)", "DNxHR LB (.mxf)"])
 def test_picture_transcode(env, codec):
     from bridge import video, media
-    s = video.VideoSettings(codec=codec, frame_rate="25", resolution="640x360",
+    s = video.VideoSettings(codec=codec, frame_rate="25", resolution="360p",
                             keyframe_interval=1)
     out = video.transcode(env["cam"], os.path.join(env["d"], "pic"), s, log=lambda m: None)
     v = next(x for x in media.probe(out)["streams"] if x["codec_type"] == "video")
@@ -162,7 +162,7 @@ def test_import_with_picture_transcode(env):
     from bridge import video
     res = importer.run(env["fcp"], importer.ImportOptions(
         template=env["tpl"], out_dir=os.path.join(env["d"], "out4"), selected=["A1"],
-        picture=env["cam"], picture_video=video.VideoSettings(resolution="640x360")))
+        picture=env["cam"], picture_video=video.VideoSettings(resolution="360p")))
     root = _als(res.als_path)
     pic = root.find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
     assert pic.find("SampleRef/FileRef/Path").get("Value").endswith("_picture.mp4")
@@ -198,3 +198,62 @@ def test_template_without_clip(env, tmp_path):
     clip = _als(res.als_path).find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
     assert clip is not None and clip.find("IsWarped").get("Value") == "false"
     assert any("built-in clip" in w for w in res.warnings)
+
+
+def test_picture_keeps_aspect(tmp_path):
+    """Source with a stray pixel-aspect flag: output keeps stored proportions, square pixels, no bars."""
+    from bridge import video, media
+    src = tmp_path / "scope.mov"
+    fx.ff("-f", "lavfi", "-i", "testsrc=size=1440x804:rate=24:duration=1",
+          "-vf", "setsar=4/3", "-c:v", "mpeg4", str(src))          # displays as 1920x804
+    out = video.transcode(str(src), str(tmp_path / "o"),
+                          video.VideoSettings(resolution="720p"), log=lambda m: None)
+    v = next(x for x in media.probe(out)["streams"] if x["codec_type"] == "video")
+    assert v["height"] == 720 and abs(v["width"] / v["height"] - 1440 / 804) < 0.01
+    assert v.get("sample_aspect_ratio", "1:1") in ("1:1", "0:1", "N/A")
+
+
+def test_add_to_existing_project(env, tmp_path):
+    first = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], out_dir=str(tmp_path), selected=["A1"], tempo=100.0,
+        offset_tc="00:59:58:00", sample_rate=96000))
+    proj = os.path.dirname(first.als_path)
+    # second export from Resolve, added to the same project, building on the first set
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], existing_project=proj, base_set=first.als_path,
+        selected=["A3"], note="SFX pickups"))
+    assert os.path.basename(res.als_path) == "Spot 30s - SFX pickups.als"
+    root = _als(res.als_path)
+    names = [t.find("Name/EffectiveName").get("Value") for t in root.findall("LiveSet/Tracks/AudioTrack")]
+    assert names == ["ORIG - A1", "ORIG - A3"]
+    assert root.find("LiveSet/Tracks")[-1].tag == "ReturnTrack"
+    # same offset/tempo as the first import → whoosh at 264+48 frames, 100 BPM
+    w = root.findall("LiveSet/Tracks/AudioTrack")[1].find(".//Events/AudioClip")
+    assert abs(float(w.get("Time")) - float(frames(312)) * 100 / 60) < 1e-6
+    wav = w.find("SampleRef/FileRef/Path").get("Value")
+    assert "/Samples/Imported/" in wav.replace("\\", "/") and wav.endswith("_96k.wav")
+    ids = [e.get("Id") for e in root.iter() if e.tag.endswith("Target") and e.get("Id")]
+    assert len(ids) == len(set(ids))
+    assert len(root.findall("LiveSet/Locators/Locators/Locator")) == 1     # no duplicate
+    side = Sidecar.load(Sidecar.path_for(res.als_path))
+    assert len(side.media) == 2
+    # new-tracks-only variant + auto name
+    res2 = importer.run(env["fcp"], importer.ImportOptions(
+        template=env["tpl"], existing_project=proj, selected=["A2"]))
+    assert " - added " in os.path.basename(res2.als_path)
+
+
+def test_project_icon_copied(env, tmp_path):
+    import shutil
+    ref = tmp_path / "Tpl Project"
+    (ref / "Ableton Project Info").mkdir(parents=True)
+    (ref / "Ableton Project Info" / "AProject.ico").write_bytes(b"ICO")
+    (ref / "desktop.ini").write_text("[.ShellClassInfo]\nIconResource=Ableton Project Info\\AProject.ico,0\n")
+    tpl = ref / "Tpl.als"
+    shutil.copy(env["tpl"], tpl)
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=str(tpl), out_dir=str(tmp_path / "out"), selected=["A1"]))
+    proj = os.path.dirname(res.als_path)
+    assert (open(os.path.join(proj, "desktop.ini")).read().strip().endswith("AProject.ico,0"))
+    assert os.path.exists(os.path.join(proj, "Ableton Project Info\\AProject.ico")) or \
+        os.path.exists(os.path.join(proj, "Ableton Project Info", "AProject.ico"))

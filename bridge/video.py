@@ -33,14 +33,28 @@ CODECS = {
 FRAME_RATES = ["Same as source", "23.976", "24", "25", "29.97", "30", "50", "59.94", "60"]
 RATE_ARG = {"23.976": "24000/1001", "29.97": "30000/1001", "59.94": "60000/1001"}
 
-RESOLUTIONS = ["Same as source", "3840x2160", "1920x1080", "1280x720", "960x540", "640x360"]
+# Height only: width follows the picture's own aspect ratio (no stretching, no bars).
+RESOLUTIONS = ["Same as source", "2160p", "1080p", "720p", "540p", "360p"]
+
+
+def _height(res: str) -> int | None:
+    """'720p' -> 720; older saved values like '1280x720' -> 720."""
+    if not res or res == "Same as source":
+        return None
+    res = res.lower().rstrip("p")
+    if "x" in res:
+        res = res.split("x")[1]
+    try:
+        return int(res)
+    except ValueError:
+        return None
 
 
 @dataclass
 class VideoSettings:
     codec: str = "H.264 (.mp4)"
     frame_rate: str = "Same as source"
-    resolution: str = "1280x720"
+    resolution: str = "720p"
     keyframe_interval: int = 1           # frames; 1 = every frame is a keyframe
     keep_audio: bool = False
     burn_timecode: bool = False
@@ -69,24 +83,27 @@ def build_command(src: str, dst: str, s: VideoSettings) -> list[str]:
     src_rate = vstream.get("r_frame_rate", "25/1")
     tc = source_timecode(info)
 
-    filters = []
-    if s.resolution != "Same as source":
-        w, h = s.resolution.split("x")
-        filters.append(f"scale={w}:{h}:force_original_aspect_ratio=decrease")
-        filters.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    # Treat pixels as square (Resolve renders square pixels; a stray pixel-aspect
+    # flag otherwise makes players stretch the picture and add black bars),
+    # then scale to the chosen height keeping the stored proportions. No padding.
+    filters = ["setsar=1"]
+    h = _height(s.resolution)
+    if h:
+        filters.append(f"scale=-2:{h}")
     rate = src_rate if s.frame_rate == "Same as source" else RATE_ARG.get(s.frame_rate, s.frame_rate)
     if s.frame_rate != "Same as source":
         filters.append(f"fps={rate}")
     if s.burn_timecode:
         font = _font()
         start = (tc or "00:00:00:00").replace(":", r"\:")
-        dt = (f"drawtext=timecode='{start}':rate={rate}:fontsize=h/18:fontcolor=white:"
-              f"box=1:boxcolor=black@0.6:boxborderw=8:x=(w-tw)/2:y=h-th-h/20")
+        dt = (f"drawtext=timecode='{start}':rate={rate}:fontsize=h/30:fontcolor=white:"
+              f"box=1:boxcolor=black@0.6:boxborderw=8:x=(w-tw)/2:y=h/30")
         if font:
             dt += f":fontfile='{font}'"
         filters.append(dt)
     # dnxhr/prores need even sizes; H.264 needs even sizes too
     filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    filters.append("setsar=1")
 
     cmd = [tool("ffmpeg"), "-y", "-v", "error", "-i", src, "-map", "0:v:0"]
     if s.keep_audio and any(x.get("codec_type") == "audio" for x in info["streams"]):
