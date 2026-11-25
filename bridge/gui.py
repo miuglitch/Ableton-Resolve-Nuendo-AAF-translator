@@ -23,6 +23,7 @@ except Exception:          # app still works without drag and drop
 
 from . import __version__, importer, video
 from .media import SAMPLE_RATES
+from .scrolling import ScrollManager
 from .timecode import seconds_to_tc
 
 SETTINGS = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
@@ -200,11 +201,13 @@ class App(Base):
             tabs.add(name)
         self._recolor_tabs()
 
+        self.scroll = ScrollManager(self)
         self._build_import(tabs.tab("Resolve / Nuendo → Live"))
         exp = tabs.tab("Live → Resolve / Nuendo")
         label(exp, "Export is the next build step.", size=13).pack(anchor="w", padx=8, pady=8)
         self._build_video(tabs.tab("Picture transcode"))
 
+        self.scroll.install()
         if HAS_DND:
             self.drop_target_register(DND_FILES)
             self.dnd_bind("<<Drop>>", self._drop_anywhere)
@@ -256,6 +259,8 @@ class App(Base):
         elif kind == "picture":
             self.v_pic.set(path)
         elif kind == "folder":
+            self.v_next.set(False)
+            self._toggle_next()
             self.v_out.set(path if os.path.isdir(path) else os.path.dirname(path))
         elif kind == "vin":
             self.vv_in.set(path)
@@ -277,12 +282,15 @@ class App(Base):
         page = ctk.CTkScrollableFrame(tab, fg_color=BG, scrollbar_button_color=LINE,
                                       scrollbar_button_hover_color=DIM)
         page.pack(fill="both", expand=True)
+        self.scroll.register(page)
         page.columnconfigure(0, weight=1)
 
         s = self.settings
         self.v_in = tk.StringVar()
         self.v_tpl = tk.StringVar(value=s.get("template", ""))
         self.v_out = tk.StringVar(value=s.get("out_dir", ""))
+        self.custom_out = s.get("out_dir", "")
+        self.v_next = tk.BooleanVar(value=s.get("save_next_to_timeline", True))
         self.v_name = tk.StringVar()
         self.v_tempo = tk.StringVar(value=str(s.get("tempo", 120)))
         self.v_sr = tk.StringVar(value=str(s.get("sample_rate", 48000)))
@@ -303,8 +311,16 @@ class App(Base):
         self._file_row(files, 1, "Timeline", self.v_in, self._pick_input, "timeline")
         self._file_row(files, 2, "Live template", self.v_tpl,
                        lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), "template")
-        self._file_row(files, 3, "Save project in", self.v_out, self._pick_out, "folder")
-        ctk.CTkFrame(files, height=8, width=1, fg_color="transparent").grid(row=4, column=0)
+        self.out_entry = self._file_row(files, 3, "Save project in", self.v_out, self._pick_out, "folder")
+        check(files, "Next to the timeline file", self.v_next).grid(
+            row=4, column=1, sticky="w", pady=(2, 2))
+        self.v_next.trace_add("write", lambda *a: self._toggle_next())
+        self.preview = ctk.CTkLabel(files, text="", font=f(11), text_color=DIM, anchor="w",
+                                    justify="left", wraplength=640)
+        self.preview.grid(row=5, column=1, columnspan=2, sticky="w", pady=(0, 10))
+        for v in (self.v_out, self.v_name, self.v_in):
+            v.trace_add("write", lambda *a: self._update_preview())
+        self._toggle_next()
 
         st = Card(page, "Session")
         st.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -325,10 +341,21 @@ class App(Base):
         bar.grid(row=1, column=0, columnspan=4, sticky="w", padx=14)
         button(bar, "Select all", lambda: self._all(True)).pack(side="left", padx=(0, 6))
         button(bar, "Select none", lambda: self._all(False)).pack(side="left")
-        self.list_frame = ctk.CTkScrollableFrame(tr, fg_color=FIELD, height=170, corner_radius=6,
+        self.list_frame = ctk.CTkScrollableFrame(tr, fg_color=FIELD, height=40, corner_radius=6,
                                                  scrollbar_button_color=LINE)
-        self.list_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=(8, 14))
+        self.list_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=(8, 0))
+        self.scroll.register(self.list_frame)
         label(self.list_frame, "No timeline loaded.").pack(anchor="w", padx=6, pady=6)
+        grip = ctk.CTkFrame(tr, height=14, fg_color="transparent", cursor="sb_v_double_arrow")
+        grip.grid(row=3, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 8))
+        bar_ = ctk.CTkFrame(grip, height=4, width=48, fg_color=LINE, corner_radius=2,
+                            cursor="sb_v_double_arrow")
+        bar_.place(relx=0.5, rely=0.5, anchor="center")
+        for w in (grip, bar_):
+            w.bind("<ButtonPress-1>", self._grip_start)
+            w.bind("<B1-Motion>", self._grip_drag)
+        self._list_h = 40
+        self.after(50, self._fit_list)
 
         pc = Card(page, "Picture reference (optional)")
         pc.grid(row=4, column=0, sticky="ew", pady=(0, 10))
@@ -400,9 +427,77 @@ class App(Base):
             check(self.list_frame, f"{t.name}    {n} clip{'s' if n != 1 else ''} · {chans}", v).pack(
                 anchor="w", padx=6, pady=3)
             self.track_vars.append((t.name, v))
+        if self.v_next.get():
+            self.v_out.set(os.path.dirname(os.path.abspath(p)))
+        self.after(30, self._fit_list)
         self._log(f"Loaded {os.path.basename(p)}: {len(tl.audio_tracks)} audio tracks")
         for w in tl.warnings:
             self._log("! " + w)
+
+    # -- save location ----------------------------------------------------------
+    def _toggle_next(self):
+        if not hasattr(self, "out_entry"):
+            return
+        if self.v_next.get():
+            if self.v_out.get() and self.v_out.get() != self._timeline_dir():
+                self.custom_out = self.v_out.get()
+            self.v_out.set(self._timeline_dir())
+            self.out_entry.configure(state="disabled", text_color=DIM)
+        else:
+            self.out_entry.configure(state="normal", text_color=TEXT)
+            if self.v_out.get() == self._timeline_dir():
+                self.v_out.set(self.custom_out)
+        self._update_preview()
+
+    def _timeline_dir(self):
+        p = self.v_in.get()
+        return os.path.dirname(os.path.abspath(p)) if p else ""
+
+    def _update_preview(self):
+        if not hasattr(self, "preview"):
+            return
+        out, name = self.v_out.get(), importer._safe(self.v_name.get() or "Timeline")
+        if not out:
+            self.preview.configure(text="Load a timeline, or untick and choose a folder.")
+            return
+        proj = os.path.join(out, f"{name} Project")
+        self.preview.configure(text=f"Creates  {os.path.normpath(os.path.join(proj, name + '.als'))}")
+
+    # -- track list sizing --------------------------------------------------------
+    MAX_ROWS = 10
+
+    def _rows(self):
+        return [w for w in self.list_frame.winfo_children() if w.winfo_manager() == "pack"]
+
+    def _fit_list(self):
+        """Height = all tracks up to 10, then scroll."""
+        self.update_idletasks()
+        rows = self._rows()
+        if not rows:
+            return
+        row_h = max(r.winfo_reqheight() for r in rows) + 6
+        visible = min(len(rows), self.MAX_ROWS)
+        self._set_list_height(visible * row_h + 6)
+
+    def _set_list_height(self, h):
+        h = int(max(36, min(h, 2000)))
+        self._list_h = h
+        self.list_frame.configure(height=h)
+        self.update_idletasks()
+        content = sum(r.winfo_reqheight() + 6 for r in self._rows())
+        sb = self.list_frame._scrollbar
+        if content > h + 4:
+            sb.grid()
+        else:
+            sb.grid_remove()
+            self.list_frame._parent_canvas.yview_moveto(0)
+
+    def _grip_start(self, event):
+        self._grip = (event.y_root, self._list_h)
+
+    def _grip_drag(self, event):
+        y0, h0 = self._grip
+        self._set_list_height(h0 + (event.y_root - y0))
 
     def _all(self, on):
         for _, v in self.track_vars:
@@ -426,7 +521,9 @@ class App(Base):
             tempo = float(self.v_tempo.get())
         except ValueError:
             return self._log("! Tempo must be a number.")
-        self.settings.update(template=self.v_tpl.get(), out_dir=self.v_out.get(), tempo=tempo,
+        if not self.v_next.get():
+            self.settings["out_dir"] = self.v_out.get()
+        self.settings.update(template=self.v_tpl.get(), save_next_to_timeline=self.v_next.get(), tempo=tempo,
                              picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()))
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
