@@ -152,6 +152,8 @@ class _Reader:
                 chans += _channels(a.get("srcCh"))
         if disabled_all:
             return
+        if not chans and asset.get("audioChannels") == "1":
+            chans = [1]
         clip = Clip(name, abs_start, dur, path, src_in, channels=sorted(set(chans)),
                     enabled=enabled)
         self._volume(el, clip, start)
@@ -210,6 +212,8 @@ def read(path: str, project_name: str | None = None) -> Timeline:
             tname = f"A (lane {lane})"
         trk = Track(name=tname, kind="audio",
                     clips=sorted([c for l, c in clips if l == lane], key=lambda c: c.start))
+        if trk.clips and all(len(c.channels) == 1 for c in trk.clips):
+            trk.channels = 1
         tl.tracks.append(trk)
 
     vlanes = sorted({lane for lane, _ in r.video_clips})

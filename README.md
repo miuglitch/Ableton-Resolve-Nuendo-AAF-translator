@@ -20,27 +20,25 @@ OUTPUT\v0.2.0\MIUGLITCH AAF Translator.exe
 Each new version gets its own folder (~17 MB). Old version folders can be deleted.
 Every push also publishes the exe as a GitHub release (vX.Y.Z).
 
-## One-time step: make the Live template
+## Live template
 
-Live Sets contain hundreds of settings that change between Live versions, so
-the app builds each set from a template saved by **your** Live:
+The app builds each set from a Live Set saved by your own Live, so the sets
+match your Live version exactly:
 
-1. In Live 12 (so the sets also open in Live 13), create a new empty Live Set.
-2. Delete all tracks except **one audio track**.
-3. (The template's sample rate doesn't matter — Live stores it as a preference.)
-4. Drag any WAV file onto that audio track in **Arrangement View**.
-5. Add one locator (Create → Add Locator).
-6. Save it as `Bridge Template.als`, e.g. in the app folder.
+1. In Live 12, create a new empty Live Set and delete all tracks except one audio track.
+2. Recommended: drag any WAV onto that track (Arrangement or Session view) and add one locator.
+3. Save it as `Bridge Template.als`.
 
-Pick this file once in the app; it is remembered.
+If the template has no clip, a built-in clip definition is used instead and
+the report says so. Drop the template on the app once; it is remembered.
 
 ## Import: Resolve → Live
 
 **In Resolve:** File → Export → Timeline… → **FCPXML** (recommended: carries
 markers) or **AAF** (Fairlight export, linked media).
 
-**In the app:**
-1. Choose the timeline file; the track list appears with every track ticked.
+**In the app** (drag and drop works for every file and folder):
+1. Drop or choose the timeline file; the track list appears with every track ticked.
 2. Untick tracks you don't need (only ticked tracks are converted).
 3. **Live 0:00 = timecode:** defaults to the timeline start (usually
    01:00:00:00). Set e.g. `00:59:58:00` for two seconds of pre-roll.

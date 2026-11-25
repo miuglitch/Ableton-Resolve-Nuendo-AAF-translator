@@ -1,17 +1,48 @@
-"""Windows app: Resolve/Nuendo → Live import with a track checklist."""
+"""Windows app — dark grey flat interface with drag and drop.
+
+Drop files anywhere on the window and they go to the right field by type:
+  .aaf / .fcpxml / .fcpxmld / .xml → timeline      .als → Live template
+  video files                       → picture        folder → save location
+Each field also accepts drops of its own.
+"""
 from __future__ import annotations
 
 import json
 import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog
+
+import customtkinter as ctk
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    HAS_DND = True
+except Exception:          # app still works without drag and drop
+    HAS_DND = False
 
 from . import __version__, importer, video
+from .media import SAMPLE_RATES
 from .timecode import seconds_to_tc
 
 SETTINGS = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
                         "MIUGLITCH", "aaf-translator.json")
+
+# --- palette ---------------------------------------------------------------
+BG = "#1b1b1c"          # window
+PANEL = "#242426"       # cards
+FIELD = "#2e2e31"       # inputs
+LINE = "#3a3a3e"        # borders
+TEXT = "#e8e8ea"
+DIM = "#9a9aa0"
+ACCENT = "#d0d0d4"      # light grey accent: buttons, checks
+ACCENT_TEXT = "#111112"
+HOVER = "#f0f0f2"
+DROP = "#36363a"
+FONT = "Segoe UI"
+
+TIMELINE_EXT = {".aaf", ".fcpxml", ".fcpxmld", ".xml"}
+VIDEO_EXT = {".mov", ".mp4", ".m4v", ".mxf", ".avi", ".mkv"}
 
 
 def load_settings():
@@ -28,11 +59,62 @@ def save_settings(d):
         json.dump(d, fh, indent=2)
 
 
-class VideoPanel(ttk.LabelFrame):
+def f(size=13, weight="normal"):
+    return ctk.CTkFont(family=FONT, size=size, weight=weight)
+
+
+# --- small building blocks -------------------------------------------------
+class Card(ctk.CTkFrame):
+    def __init__(self, parent, title=None, **kw):
+        super().__init__(parent, fg_color=PANEL, corner_radius=10, border_width=1,
+                         border_color=LINE, **kw)
+        self.columnconfigure(1, weight=1)
+        if title:
+            ctk.CTkLabel(self, text=title.upper(), font=f(11, "bold"), text_color=DIM).grid(
+                row=0, column=0, columnspan=4, sticky="w", padx=14, pady=(10, 4))
+
+
+def entry(parent, var, width=None):
+    kw = dict(textvariable=var, fg_color=FIELD, border_color=LINE, text_color=TEXT,
+              font=f(12), corner_radius=6, height=30)
+    if width:
+        kw["width"] = width
+    return ctk.CTkEntry(parent, **kw)
+
+
+def button(parent, text, cmd, primary=False, width=90):
+    if primary:
+        return ctk.CTkButton(parent, text=text, command=cmd, fg_color=ACCENT, hover_color=HOVER,
+                             text_color=ACCENT_TEXT, font=f(13, "bold"), corner_radius=8,
+                             height=38, width=width)
+    return ctk.CTkButton(parent, text=text, command=cmd, fg_color=FIELD, hover_color=LINE,
+                         text_color=TEXT, font=f(12), corner_radius=6, height=30, width=width,
+                         border_width=1, border_color=LINE)
+
+
+def combo(parent, var, values, width=150):
+    return ctk.CTkOptionMenu(parent, variable=var, values=values, width=width, height=30,
+                             fg_color=FIELD, button_color=LINE, button_hover_color=DROP,
+                             dropdown_fg_color=PANEL, dropdown_hover_color=LINE,
+                             text_color=TEXT, font=f(12), dropdown_font=f(12), corner_radius=6)
+
+
+def check(parent, text, var):
+    return ctk.CTkCheckBox(parent, text=text, variable=var, font=f(12), text_color=TEXT,
+                           fg_color=ACCENT, hover_color=HOVER, checkmark_color=ACCENT_TEXT,
+                           border_color=DIM, corner_radius=4, border_width=2,
+                           checkbox_width=18, checkbox_height=18)
+
+
+def label(parent, text, dim=True, size=12):
+    return ctk.CTkLabel(parent, text=text, font=f(size), text_color=DIM if dim else TEXT)
+
+
+class VideoPanel(Card):
     """Codec / frame rate / resolution / keyframe interval chooser."""
 
     def __init__(self, parent, title, settings, key):
-        super().__init__(parent, text=title, padding=6)
+        super().__init__(parent, title)
         d = settings.get(key, {})
         self.settings, self.key = settings, key
         self.v_codec = tk.StringVar(value=d.get("codec", "H.264 (.mp4)"))
@@ -41,26 +123,29 @@ class VideoPanel(ttk.LabelFrame):
         self.v_gop = tk.StringVar(value=str(d.get("keyframe_interval", 1)))
         self.v_audio = tk.BooleanVar(value=d.get("keep_audio", False))
         self.v_tc = tk.BooleanVar(value=d.get("burn_timecode", False))
-        rows = [("Codec", ttk.Combobox(self, textvariable=self.v_codec, state="readonly",
-                                      values=list(video.CODECS), width=26)),
-                ("Frame rate", ttk.Combobox(self, textvariable=self.v_rate, state="readonly",
-                                           values=video.FRAME_RATES, width=16)),
-                ("Resolution", ttk.Combobox(self, textvariable=self.v_res,
-                                           values=video.RESOLUTIONS, width=16)),
-                ("Keyframe every (frames)", ttk.Spinbox(self, textvariable=self.v_gop,
-                                                        from_=1, to=600, width=8))]
-        for i, (label, w) in enumerate(rows):
-            ttk.Label(self, text=label).grid(row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 4), pady=2)
-            w.grid(row=i // 2, column=(i % 2) * 2 + 1, sticky="w", padx=(0, 16))
-        self.gop_widget = rows[3][1]
-        ttk.Checkbutton(self, text="Keep audio", variable=self.v_audio).grid(row=2, column=0, sticky="w")
-        ttk.Checkbutton(self, text="Burn in timecode", variable=self.v_tc).grid(row=2, column=1, sticky="w")
+
+        g = ctk.CTkFrame(self, fg_color="transparent")
+        g.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 12))
+        label(g, "Codec").grid(row=0, column=0, sticky="w")
+        combo(g, self.v_codec, list(video.CODECS), 210).grid(row=1, column=0, sticky="w", padx=(0, 12))
+        label(g, "Frame rate").grid(row=0, column=1, sticky="w")
+        combo(g, self.v_rate, video.FRAME_RATES, 140).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        label(g, "Resolution").grid(row=0, column=2, sticky="w")
+        combo(g, self.v_res, video.RESOLUTIONS, 140).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        label(g, "Keyframe every (frames)").grid(row=0, column=3, sticky="w")
+        self.gop = entry(g, self.v_gop, 70)
+        self.gop.grid(row=1, column=3, sticky="w")
+        row = ctk.CTkFrame(g, fg_color="transparent")
+        row.grid(row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        check(row, "Keep audio", self.v_audio).pack(side="left", padx=(0, 18))
+        check(row, "Burn in timecode", self.v_tc).pack(side="left")
         self.v_codec.trace_add("write", lambda *a: self._gop_state())
         self._gop_state()
 
     def _gop_state(self):
-        intra_only = not video.CODECS[self.v_codec.get()][2]
-        self.gop_widget.config(state="disabled" if intra_only else "normal")
+        intra = not video.CODECS[self.v_codec.get()][2]
+        self.gop.configure(state="disabled" if intra else "normal",
+                           text_color=DIM if intra else TEXT)
 
     def get(self) -> "video.VideoSettings":
         try:
@@ -74,130 +159,205 @@ class VideoPanel(ttk.LabelFrame):
         return s
 
 
-class App(tk.Tk):
+# --- the window --------------------------------------------------------------
+Base = (type("Base", (ctk.CTk, TkinterDnD.DnDWrapper), {}) if HAS_DND else ctk.CTk)
+
+
+class App(Base):
     def __init__(self):
+        global HAS_DND
         super().__init__()
+        if HAS_DND:
+            try:
+                self.TkdndVersion = TkinterDnD._require(self)
+            except Exception:
+                HAS_DND = False
+        ctk.set_appearance_mode("dark")
+        self.configure(fg_color=BG)
         self.title(f"MIUGLITCH AAF Translator {__version__}")
-        self.geometry("860x900")
+        self.geometry("940x980")
+        self.minsize(820, 700)
         self.settings = load_settings()
         self.tl = None
         self.track_vars = []
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
-        imp = ttk.Frame(nb, padding=10)
-        exp = ttk.Frame(nb, padding=10)
-        vid = ttk.Frame(nb, padding=10)
-        nb.add(imp, text="Resolve / Nuendo → Live")
-        nb.add(exp, text="Live → Resolve / Nuendo")
-        nb.add(vid, text="Picture transcode")
-        ttk.Label(exp, text="Export is the next build step.").pack(anchor="w")
-        self._build_import(imp)
-        self._build_video(vid)
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=22, pady=(16, 4))
+        ctk.CTkLabel(head, text="MIUGLITCH", font=f(20, "bold"), text_color=TEXT).pack(side="left")
+        ctk.CTkLabel(head, text="  AAF TRANSLATOR", font=f(20), text_color=DIM).pack(side="left")
+        ctk.CTkLabel(head, text=f"v{__version__}", font=f(11), text_color=DIM).pack(side="right")
 
-    # -- UI --------------------------------------------------------------
-    def _row(self, parent, label, var, browse=None, r=0):
-        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=2)
-        ttk.Entry(parent, textvariable=var).grid(row=r, column=1, sticky="ew", padx=4)
-        if browse:
-            ttk.Button(parent, text="Browse…", command=browse).grid(row=r, column=2)
+        tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_fg_color=PANEL,
+                              segmented_button_selected_color=ACCENT,
+                              segmented_button_selected_hover_color=HOVER,
+                              segmented_button_unselected_color=PANEL,
+                              segmented_button_unselected_hover_color=LINE,
+                              text_color=TEXT, corner_radius=10, anchor="w",
+                              command=self._recolor_tabs)
+        tabs.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.tabs = tabs
+        for name in ("Resolve / Nuendo → Live", "Live → Resolve / Nuendo", "Picture transcode"):
+            tabs.add(name)
+        self._recolor_tabs()
 
-    def _build_import(self, f):
-        f.columnconfigure(1, weight=1)
+        self._build_import(tabs.tab("Resolve / Nuendo → Live"))
+        exp = tabs.tab("Live → Resolve / Nuendo")
+        label(exp, "Export is the next build step.", size=13).pack(anchor="w", padx=8, pady=8)
+        self._build_video(tabs.tab("Picture transcode"))
+
+        if HAS_DND:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._drop_anywhere)
+
+    def _recolor_tabs(self):
+        """Dark text on the light selected tab, light text on the others."""
+        try:
+            sb = self.tabs._segmented_button
+            cur = self.tabs.get()
+            for name, btn in sb._buttons_dict.items():
+                btn.configure(text_color=ACCENT_TEXT if name == cur else TEXT)
+        except Exception:
+            pass
+
+    # -- drag and drop ---------------------------------------------------
+    def _paths(self, event):
+        return [p for p in self.tk.splitlist(event.data) if p]
+
+    def _drop_into(self, widget, kind):
+        if not HAS_DND:
+            return
+        target = getattr(widget, "_entry", widget)
+        target.drop_target_register(DND_FILES)
+
+        def handler(event):
+            paths = self._paths(event)
+            if paths:
+                self._route(paths[0], force=kind)
+            return event.action
+        target.dnd_bind("<<Drop>>", handler)
+
+    def _drop_anywhere(self, event):
+        for p in self._paths(event):
+            self._route(p)
+        return event.action
+
+    def _route(self, path, force=None):
+        ext = os.path.splitext(path.rstrip("/\\"))[1].lower()
+        kind = force or ("folder" if os.path.isdir(path) and ext != ".fcpxmld" else
+                         "timeline" if ext in TIMELINE_EXT else
+                         "template" if ext == ".als" else
+                         "picture" if ext in VIDEO_EXT else None)
+        if self.tabs.get() == "Picture transcode" and not force:
+            kind = {"picture": "vin", "folder": "vout"}.get(kind, kind)
+        if kind == "timeline":
+            self._load_timeline(path)
+        elif kind == "template":
+            self.v_tpl.set(path)
+        elif kind == "picture":
+            self.v_pic.set(path)
+        elif kind == "folder":
+            self.v_out.set(path if os.path.isdir(path) else os.path.dirname(path))
+        elif kind == "vin":
+            self.vv_in.set(path)
+        elif kind == "vout":
+            self.vv_out.set(path if os.path.isdir(path) else os.path.dirname(path))
+        else:
+            self._log(f"! Not sure what to do with {os.path.basename(path)}")
+
+    # -- import tab --------------------------------------------------------
+    def _file_row(self, card, row, text, var, browse, kind):
+        label(card, text).grid(row=row, column=0, sticky="w", padx=(14, 10), pady=4)
+        e = entry(card, var)
+        e.grid(row=row, column=1, sticky="ew", pady=4)
+        button(card, "Browse", browse, width=80).grid(row=row, column=2, padx=(8, 14), pady=4)
+        self._drop_into(e, kind)
+        return e
+
+    def _build_import(self, tab):
+        page = ctk.CTkScrollableFrame(tab, fg_color=BG, scrollbar_button_color=LINE,
+                                      scrollbar_button_hover_color=DIM)
+        page.pack(fill="both", expand=True)
+        page.columnconfigure(0, weight=1)
+
+        s = self.settings
         self.v_in = tk.StringVar()
-        self.v_tpl = tk.StringVar(value=self.settings.get("template", ""))
-        self.v_out = tk.StringVar(value=self.settings.get("out_dir", ""))
+        self.v_tpl = tk.StringVar(value=s.get("template", ""))
+        self.v_out = tk.StringVar(value=s.get("out_dir", ""))
         self.v_name = tk.StringVar()
-        self.v_tempo = tk.StringVar(value=str(self.settings.get("tempo", 120)))
-        self.v_sr = tk.StringVar(value=str(self.settings.get("sample_rate", 48000)))
+        self.v_tempo = tk.StringVar(value=str(s.get("tempo", 120)))
+        self.v_sr = tk.StringVar(value=str(s.get("sample_rate", 48000)))
         self.v_offset = tk.StringVar()
         self.v_pic = tk.StringVar()
         self.v_pic_tc = tk.StringVar()
+        self.v_pic_conv = tk.BooleanVar(value=s.get("picture_convert", True))
 
-        self._row(f, "Timeline (AAF / FCPXML)", self.v_in, self._pick_input, 0)
-        self._row(f, "Live template set", self.v_tpl,
-                  lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), 1)
-        self._row(f, "Save project in", self.v_out, self._pick_out, 2)
-        self._row(f, "Set name", self.v_name, None, 3)
-        ttk.Label(f, text="Tempo (BPM)").grid(row=4, column=0, sticky="w", pady=2)
-        row4 = ttk.Frame(f)
-        row4.grid(row=4, column=1, sticky="w", padx=4)
-        ttk.Entry(row4, textvariable=self.v_tempo, width=8).pack(side="left")
-        ttk.Label(row4, text="   Sample rate (Hz)").pack(side="left")
-        ttk.Combobox(row4, textvariable=self.v_sr, state="readonly", width=8,
-                     values=["44100", "48000", "88200", "96000"]).pack(side="left", padx=4)
-        self._row(f, "Live 0:00 = timecode", self.v_offset, None, 5)
-        self._row(f, "Picture reference (optional)", self.v_pic,
-                  lambda: self._pick(self.v_pic, [("Video", "*.mov *.mp4 *.m4v"), ("All", "*.*")]), 6)
-        self._row(f, "Picture start TC (blank = from file)", self.v_pic_tc, None, 7)
-        self.v_pic_conv = tk.BooleanVar(value=self.settings.get("picture_convert", True))
-        ttk.Checkbutton(f, text="Transcode picture for Live", variable=self.v_pic_conv).grid(
-            row=8, column=0, columnspan=3, sticky="w")
-        self.pic_panel = VideoPanel(f, "Picture format", self.settings, "picture_video")
-        self.pic_panel.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        if HAS_DND:
+            hint = ctk.CTkFrame(page, fg_color=PANEL, corner_radius=10, border_width=1, border_color=LINE)
+            hint.grid(row=0, column=0, sticky="ew", pady=(4, 10))
+            ctk.CTkLabel(hint, text="Drop files anywhere: timeline (AAF / FCPXML), Live template (.als), "
+                                    "picture (video) or a folder", font=f(12), text_color=DIM
+                         ).pack(padx=14, pady=10)
 
-        self.info = ttk.Label(f, text="Load a timeline to see its tracks.")
-        self.info.grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 2))
+        files = Card(page, "Files")
+        files.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self._file_row(files, 1, "Timeline", self.v_in, self._pick_input, "timeline")
+        self._file_row(files, 2, "Live template", self.v_tpl,
+                       lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), "template")
+        self._file_row(files, 3, "Save project in", self.v_out, self._pick_out, "folder")
+        ctk.CTkFrame(files, height=8, width=1, fg_color="transparent").grid(row=4, column=0)
 
-        box = ttk.LabelFrame(f, text="Tracks to import", padding=6)
-        box.grid(row=11, column=0, columnspan=3, sticky="nsew")
-        f.rowconfigure(11, weight=1)
-        btns = ttk.Frame(box)
-        btns.pack(fill="x")
-        ttk.Button(btns, text="Select all", command=lambda: self._all(True)).pack(side="left")
-        ttk.Button(btns, text="Select none", command=lambda: self._all(False)).pack(side="left", padx=4)
-        canvas = tk.Canvas(box, height=150, highlightthickness=0)
-        sb = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
-        self.list_frame = ttk.Frame(canvas)
-        self.list_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
-        canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        st = Card(page, "Session")
+        st.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        g = ctk.CTkFrame(st, fg_color="transparent")
+        g.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 8))
+        for i, (t, w) in enumerate([("Set name", entry(g, self.v_name, 260)),
+                                    ("Tempo (BPM)", entry(g, self.v_tempo, 80)),
+                                    ("Sample rate (Hz)", combo(g, self.v_sr, [str(r) for r in SAMPLE_RATES], 110)),
+                                    ("Live 0:00 = timecode", entry(g, self.v_offset, 130))]):
+            label(g, t).grid(row=0, column=i, sticky="w")
+            w.grid(row=1, column=i, sticky="w", padx=(0, 14))
+        self.info = label(st, "Load a timeline to see its tracks.")
+        self.info.grid(row=2, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 10))
 
-        self.go = ttk.Button(f, text="Create Live Set", command=self._run)
-        self.go.grid(row=12, column=0, columnspan=3, pady=8)
-        self.bar = ttk.Progressbar(f, mode="determinate")
-        self.bar.grid(row=13, column=0, columnspan=3, sticky="ew")
-        self.log = tk.Text(f, height=7, wrap="word")
-        self.log.grid(row=14, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        tr = Card(page, "Tracks to import")
+        tr.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        bar = ctk.CTkFrame(tr, fg_color="transparent")
+        bar.grid(row=1, column=0, columnspan=4, sticky="w", padx=14)
+        button(bar, "Select all", lambda: self._all(True)).pack(side="left", padx=(0, 6))
+        button(bar, "Select none", lambda: self._all(False)).pack(side="left")
+        self.list_frame = ctk.CTkScrollableFrame(tr, fg_color=FIELD, height=170, corner_radius=6,
+                                                 scrollbar_button_color=LINE)
+        self.list_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14, pady=(8, 14))
+        label(self.list_frame, "No timeline loaded.").pack(anchor="w", padx=6, pady=6)
 
-    def _build_video(self, f):
-        f.columnconfigure(1, weight=1)
-        self.vv_in = tk.StringVar()
-        self.vv_out = tk.StringVar(value=self.settings.get("video_out", ""))
-        self._row(f, "Video file", self.vv_in,
-                  lambda: self._pick(self.vv_in, [("Video", "*.mov *.mp4 *.mxf *.m4v *.avi"), ("All", "*.*")]), 0)
-        self._row(f, "Save to folder", self.vv_out,
-                  lambda: self.vv_out.set(filedialog.askdirectory() or self.vv_out.get()), 1)
-        self.vid_panel = VideoPanel(f, "Output format", self.settings, "standalone_video")
-        self.vid_panel.grid(row=2, column=0, columnspan=3, sticky="ew", pady=8)
-        self.vbtn = ttk.Button(f, text="Transcode", command=self._run_video)
-        self.vbtn.grid(row=3, column=0, columnspan=3)
-        self.vlog = tk.Text(f, height=8, wrap="word")
-        self.vlog.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=6)
+        pc = Card(page, "Picture reference (optional)")
+        pc.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        self._file_row(pc, 1, "Video file", self.v_pic,
+                       lambda: self._pick(self.v_pic, [("Video", "*.mov *.mp4 *.m4v *.mxf"),
+                                                       ("All", "*.*")]), "picture")
+        label(pc, "Start timecode").grid(row=2, column=0, sticky="w", padx=(14, 10), pady=4)
+        tcrow = ctk.CTkFrame(pc, fg_color="transparent")
+        tcrow.grid(row=2, column=1, sticky="w")
+        entry(tcrow, self.v_pic_tc, 130).pack(side="left")
+        label(tcrow, "  blank = read from the file").pack(side="left")
+        check(pc, "Transcode picture for Live", self.v_pic_conv).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 8))
+        self.pic_panel = VideoPanel(pc, "Picture format", s, "picture_video")
+        self.pic_panel.grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
 
-    def _run_video(self):
-        src, out = self.vv_in.get(), self.vv_out.get() or os.path.dirname(self.vv_in.get())
-        if not os.path.isfile(src):
-            messagebox.showinfo("No file", "Choose a video file.")
-            return
-        s = self.vid_panel.get()
-        self.settings["video_out"] = out
-        save_settings(self.settings)
-        self.vbtn.config(state="disabled")
-        say = lambda m: self.after(0, lambda: (self.vlog.insert("end", m + "\n"), self.vlog.see("end")))
+        run = ctk.CTkFrame(page, fg_color="transparent")
+        run.grid(row=5, column=0, sticky="ew", pady=(4, 6))
+        run.columnconfigure(1, weight=1)
+        self.go = button(run, "Create Live Set", self._run, primary=True, width=200)
+        self.go.grid(row=0, column=0, sticky="w")
+        self.bar = ctk.CTkProgressBar(run, fg_color=FIELD, progress_color=ACCENT, height=8)
+        self.bar.set(0)
+        self.bar.grid(row=0, column=1, sticky="ew", padx=(16, 0))
 
-        def work():
-            try:
-                dst = video.transcode(src, out, s, say)
-                say(f"Done: {dst}")
-            except Exception as e:
-                say(f"Failed: {e}")
-            finally:
-                self.after(0, lambda: self.vbtn.config(state="normal"))
-
-        threading.Thread(target=work, daemon=True).start()
+        self.log = ctk.CTkTextbox(page, height=160, fg_color=PANEL, text_color=TEXT,
+                                  border_width=1, border_color=LINE, font=ctk.CTkFont("Consolas", 12),
+                                  corner_radius=8)
+        self.log.grid(row=6, column=0, sticky="ew", pady=(6, 4))
 
     def _pick(self, var, types):
         p = filedialog.askopenfilename(filetypes=types)
@@ -211,30 +371,36 @@ class App(tk.Tk):
 
     def _pick_input(self):
         p = filedialog.askopenfilename(filetypes=[("Timelines", "*.aaf *.fcpxml *.xml"), ("All", "*.*")])
-        if not p:
-            return
+        if p:
+            self._load_timeline(p)
+
+    def _load_timeline(self, p):
         self.v_in.set(p)
         try:
             self.tl = importer.load(p)
         except Exception as e:
-            messagebox.showerror("Can't read timeline", str(e))
+            self._log(f"! Can't read timeline: {e}")
+            self.tl = None
             return
         tl = self.tl
         self.v_name.set(tl.name)
         start_tc = seconds_to_tc(tl.start, tl.frame_rate, tl.drop_frame)
         self.v_offset.set(start_tc)
-        self.info.config(text=f"{tl.name} — {float(tl.frame_rate):.3f} fps"
-                              f"{' DF' if tl.drop_frame else ''}, starts {start_tc}, "
-                              f"{len(tl.markers)} markers")
+        self.info.configure(text=f"{tl.name}  ·  {float(tl.frame_rate):.3f} fps"
+                                 f"{' DF' if tl.drop_frame else ''}  ·  starts {start_tc}  ·  "
+                                 f"{tl.sample_rate} Hz  ·  {len(tl.markers)} marker{'s' if len(tl.markers) != 1 else ''}",
+                            text_color=TEXT)
         for w in self.list_frame.winfo_children():
             w.destroy()
         self.track_vars = []
         for t in tl.audio_tracks:
             v = tk.BooleanVar(value=True)
             chans = "mono" if t.channels == 1 else "stereo"
-            ttk.Checkbutton(self.list_frame, variable=v,
-                            text=f"{t.name}   ({len(t.clips)} clips, {chans})").pack(anchor="w")
+            n = len(t.clips)
+            check(self.list_frame, f"{t.name}    {n} clip{'s' if n != 1 else ''} · {chans}", v).pack(
+                anchor="w", padx=6, pady=3)
             self.track_vars.append((t.name, v))
+        self._log(f"Loaded {os.path.basename(p)}: {len(tl.audio_tracks)} audio tracks")
         for w in tl.warnings:
             self._log("! " + w)
 
@@ -248,28 +414,20 @@ class App(tk.Tk):
 
     def _run(self):
         if not self.tl:
-            messagebox.showinfo("No timeline", "Load an AAF or FCPXML first.")
-            return
+            return self._log("! Load or drop an AAF / FCPXML first.")
         if not os.path.isfile(self.v_tpl.get()):
-            messagebox.showinfo("Template needed",
-                                "Pick your Live template set (see README: 'Make the Live template').")
-            return
+            return self._log("! Pick or drop your Live template set (.als).")
         if not self.v_out.get():
-            messagebox.showinfo("Folder needed", "Choose where to save the project.")
-            return
+            return self._log("! Choose or drop the folder to save the project in.")
         selected = [n for n, v in self.track_vars if v.get()]
         if not selected:
-            messagebox.showinfo("No tracks", "Tick at least one track.")
-            return
+            return self._log("! Tick at least one track.")
         try:
             tempo = float(self.v_tempo.get())
         except ValueError:
-            messagebox.showerror("Tempo", "Tempo must be a number.")
-            return
+            return self._log("! Tempo must be a number.")
         self.settings.update(template=self.v_tpl.get(), out_dir=self.v_out.get(), tempo=tempo,
                              picture_convert=self.v_pic_conv.get(), sample_rate=int(self.v_sr.get()))
-        save_settings(self.settings)
-
         opt = importer.ImportOptions(
             template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
@@ -277,25 +435,72 @@ class App(tk.Tk):
             picture=self.v_pic.get() or None, picture_tc=self.v_pic_tc.get() or None,
             picture_video=self.pic_panel.get() if self.v_pic_conv.get() else None,
             log=lambda m: self.after(0, self._log, m),
-            progress=lambda i, n: self.after(0, self._progress, i, n))
-        self.go.config(state="disabled")
+            progress=lambda i, n: self.after(0, self.bar.set, (i + 1) / max(n, 1)))
+        save_settings(self.settings)
+        self.go.configure(state="disabled", text="Working…")
+        path = self.v_in.get()
 
         def work():
             try:
-                res = importer.run(self.v_in.get(), opt, tl=self.tl)
-                self.after(0, lambda: messagebox.showinfo(
-                    "Done", f"Live Set created:\n{res.als_path}\n\n"
-                            f"{len(res.warnings)} warning(s) — see the report next to the set."))
+                res = importer.run(path, opt, tl=self.tl)
+                self.after(0, self._log, f"✓ Live Set created: {res.als_path}")
+                self.after(0, self._log, f"  {len(res.warnings)} warning(s), report saved next to the set.")
             except Exception as e:
-                self.after(0, lambda e=e: messagebox.showerror("Import failed", str(e)))
+                self.after(0, self._log, f"✗ Import failed: {e}")
             finally:
-                self.after(0, lambda: self.go.config(state="normal"))
-                self.tl = importer.load(self.v_in.get())   # fresh copy for another run
+                self.after(0, lambda: self.go.configure(state="normal", text="Create Live Set"))
+                try:
+                    self.tl = importer.load(path)     # fresh copy for another run
+                except Exception:
+                    pass
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _progress(self, i, n):
-        self.bar.config(maximum=max(n, 1), value=i + 1)
+    # -- picture transcode tab --------------------------------------------------
+    def _build_video(self, tab):
+        page = ctk.CTkFrame(tab, fg_color=BG)
+        page.pack(fill="both", expand=True)
+        page.columnconfigure(0, weight=1)
+        self.vv_in = tk.StringVar()
+        self.vv_out = tk.StringVar(value=self.settings.get("video_out", ""))
+        files = Card(page, "Files")
+        files.grid(row=0, column=0, sticky="ew", pady=(4, 10))
+        self._file_row(files, 1, "Video file", self.vv_in,
+                       lambda: self._pick(self.vv_in, [("Video", "*.mov *.mp4 *.mxf *.m4v *.avi"),
+                                                       ("All", "*.*")]), "vin")
+        self._file_row(files, 2, "Save to folder", self.vv_out,
+                       lambda: self.vv_out.set(filedialog.askdirectory() or self.vv_out.get()), "vout")
+        ctk.CTkFrame(files, height=8, width=1, fg_color="transparent").grid(row=3, column=0)
+        self.vid_panel = VideoPanel(page, "Output format", self.settings, "standalone_video")
+        self.vid_panel.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self.vbtn = button(page, "Transcode", self._run_video, primary=True, width=200)
+        self.vbtn.grid(row=2, column=0, sticky="w", pady=6)
+        self.vlog = ctk.CTkTextbox(page, height=180, fg_color=PANEL, text_color=TEXT, border_width=1,
+                                   border_color=LINE, font=ctk.CTkFont("Consolas", 12), corner_radius=8)
+        self.vlog.grid(row=3, column=0, sticky="nsew", pady=6)
+
+    def _run_video(self):
+        src = self.vv_in.get()
+        out = self.vv_out.get() or os.path.dirname(src)
+
+        def say(m):
+            self.after(0, lambda: (self.vlog.insert("end", m + "\n"), self.vlog.see("end")))
+        if not os.path.isfile(src):
+            return say("! Choose or drop a video file.")
+        s = self.vid_panel.get()
+        self.settings["video_out"] = out
+        save_settings(self.settings)
+        self.vbtn.configure(state="disabled", text="Working…")
+
+        def work():
+            try:
+                say(f"✓ Done: {video.transcode(src, out, s, say)}")
+            except Exception as e:
+                say(f"✗ Failed: {e}")
+            finally:
+                self.after(0, lambda: self.vbtn.configure(state="normal", text="Transcode"))
+
+        threading.Thread(target=work, daemon=True).start()
 
 
 def main():

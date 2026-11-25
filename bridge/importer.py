@@ -75,6 +75,9 @@ def run(timeline_path: str, opt: ImportOptions, tl: Timeline | None = None) -> I
 
     b = AlsBuilder(opt.template)
     b.set_tempo(opt.tempo)
+    if b.used_builtin_clip:
+        warnings.append("The template has no audio clip, so the built-in clip definition was used. "
+                        "If Live won't open the set, drag any WAV onto the template's audio track and save it.")
 
     if opt.picture:
         try:

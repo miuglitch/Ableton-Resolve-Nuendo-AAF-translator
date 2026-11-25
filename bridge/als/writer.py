@@ -29,6 +29,39 @@ MAX_CLIP_GAIN = 15.8489     # Live clip gain max (+24 dB), linear
 EARLY = "-63072000"         # Live's "before the song" time for default events
 # ---------------------------------------------------------------------------
 
+# Used only when the template contains no audio clip at all.
+BUILTIN_CLIP = """<AudioClip Id="0" Time="0">
+<LomId Value="0"/><LomIdView Value="0"/><CurrentStart Value="0"/><CurrentEnd Value="4"/>
+<Loop><LoopStart Value="0"/><LoopEnd Value="2"/><StartRelative Value="0"/><LoopOn Value="false"/>
+<OutMarker Value="2"/><HiddenLoopStart Value="0"/><HiddenLoopEnd Value="2"/></Loop>
+<Name Value=""/><Annotation Value=""/><Color Value="13"/><LaunchMode Value="0"/>
+<LaunchQuantisation Value="0"/>
+<TimeSignature><TimeSignatures><RemoteableTimeSignature Id="0"><Numerator Value="4"/>
+<Denominator Value="4"/><Time Value="0"/></RemoteableTimeSignature></TimeSignatures></TimeSignature>
+<Envelopes><Envelopes/></Envelopes>
+<ScrollerTimePreserver><LeftTime Value="0"/><RightTime Value="0"/></ScrollerTimePreserver>
+<TimeSelection><AnchorTime Value="0"/><OtherTime Value="0"/></TimeSelection>
+<Legato Value="false"/><Ram Value="false"/><GrooveSettings><GrooveId Value="-1"/></GrooveSettings>
+<Disabled Value="false"/><VelocityAmount Value="0"/>
+<FreezeStart Value="0"/><FreezeEnd Value="0"/><IsWarped Value="false"/><TakeId Value="1"/>
+<SampleRef><FileRef><RelativePathType Value="0"/><RelativePath Value=""/><Path Value=""/>
+<Type Value="1"/><LivePackName Value=""/><LivePackId Value=""/><OriginalFileSize Value="0"/>
+<OriginalCrc Value="0"/></FileRef><LastModDate Value="0"/><SourceContext/>
+<SampleUsageHint Value="0"/><DefaultDuration Value="0"/><DefaultSampleRate Value="48000"/></SampleRef>
+<Onsets><UserOnsets/><HasUserOnsets Value="false"/></Onsets>
+<WarpMode Value="0"/><GranularityTones Value="30"/><GranularityTexture Value="65"/>
+<FluctuationTexture Value="25"/><TransientResolution Value="6"/><TransientLoopMode Value="2"/>
+<TransientEnvelope Value="100"/><ComplexProFormants Value="100"/><ComplexProEnvelope Value="128"/>
+<Sync Value="true"/><HiQ Value="true"/>
+<Fades><FadeInLength Value="0"/><FadeOutLength Value="0"/><ClipFadesAreInitialized Value="true"/>
+<CrossfadeInState Value="0"/><FadeInCurveSkew Value="0"/><FadeInCurveSlope Value="0"/>
+<FadeOutCurveSkew Value="0"/><FadeOutCurveSlope Value="0"/><IsDefaultFadeIn Value="true"/>
+<IsDefaultFadeOut Value="true"/></Fades>
+<PitchCoarse Value="0"/><PitchFine Value="0"/><SampleVolume Value="1"/>
+<WarpMarkers><WarpMarker Id="0" SecTime="0" BeatTime="0"/><WarpMarker Id="1" SecTime="1" BeatTime="2"/></WarpMarkers>
+<SavedWarpMarkersForStretched/><MarkersGenerated Value="false"/><IsSongTempoLeader Value="false"/>
+</AudioClip>"""
+
 LIVE_COLORS = {"ORIG": 13, "SD": 2, "PICTURE": 25, None: 13}
 
 
@@ -124,12 +157,17 @@ class AlsBuilder:
         if not protos:
             raise TemplateError("Template has no audio track. Save the template with one audio track.")
         self.track_proto = copy.deepcopy(protos[0])
+        # Prefer a clip Live wrote itself (Arrangement first, then anywhere in the
+        # set, e.g. Session view); otherwise use the built-in clip definition.
         clip = protos[0].find(".//MainSequencer/Sample/ArrangerAutomation/Events/AudioClip")
         if clip is None:
-            raise TemplateError(
-                "Template's audio track has no clip in the Arrangement. Drag any WAV "
-                "onto the template's audio track in Arrangement View and save it again.")
+            clip = self.root.find(".//AudioClip")
+        self.used_builtin_clip = clip is None
+        if clip is None:
+            clip = etree.fromstring(BUILTIN_CLIP)
         self.clip_proto = copy.deepcopy(clip)
+        for slot in self.clip_proto.iter("ClipSlot"):      # never nest session data
+            slot.getparent().remove(slot)
         loc = self.liveset.find("Locators/Locators/Locator")
         self.locator_proto = copy.deepcopy(loc) if loc is not None else None
         # remove existing audio/MIDI/group tracks; keep returns

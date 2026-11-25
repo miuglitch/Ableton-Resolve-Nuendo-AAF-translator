@@ -185,3 +185,16 @@ def test_import_96k(env):
     assert abs(float(clip.find("Loop/LoopStart").get("Value")) - float(frames(24))) < 1e-9
     tags = probe(wav)["format"]["tags"]
     assert int(tags["time_reference"]) == 36036 * 96000          # 10:00:00:00 @23.976
+
+
+def test_template_without_clip(env, tmp_path):
+    import re
+    from tests.fixtures import TEMPLATE_XML
+    xml = re.sub(r"<AudioClip .*?</AudioClip>", "", TEMPLATE_XML, flags=re.S)
+    tpl = tmp_path / "noclip.als"
+    tpl.write_bytes(gzip.compress(xml.encode()))
+    res = importer.run(env["fcp"], importer.ImportOptions(
+        template=str(tpl), out_dir=str(tmp_path / "o"), selected=["A1"]))
+    clip = _als(res.als_path).find("LiveSet/Tracks/AudioTrack//Events/AudioClip")
+    assert clip is not None and clip.find("IsWarped").get("Value") == "false"
+    assert any("built-in clip" in w for w in res.warnings)

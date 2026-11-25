@@ -39,7 +39,7 @@ jobs:
         run: |
           $v = python -c "import bridge; print(bridge.__version__)"
           echo "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
-          pyinstaller --noconfirm --onefile --windowed --name "MIUGLITCH AAF Translator" app.py
+          pyinstaller --noconfirm --onefile --windowed --name "MIUGLITCH AAF Translator" --collect-all customtkinter --collect-all tkinterdnd2 app.py
           Get-Item "dist/MIUGLITCH AAF Translator.exe" | Select-Object Name, Length
 
       - uses: actions/upload-artifact@v4
