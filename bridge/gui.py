@@ -22,6 +22,7 @@ except Exception:          # app still works without drag and drop
     HAS_DND = False
 
 from . import __version__, exporter, importer, video
+from . import template as template_mod
 from .media import SAMPLE_RATES
 from .gui_resolve import TAB as RESOLVE_TAB, ResolveTab
 from .scrolling import ScrollManager
@@ -275,6 +276,7 @@ class App(Base, ResolveTab):
             kind = {"template": "rtpl", "folder": "rproj" if self.rv_mode.get() == "Add to existing project"
                     else "rout"}.get(kind, kind)
         if kind == "rtpl":
+            self.rv_own.set(True)
             return self.rv_tpl.set(path)
         if kind == "rout":
             return self.rv_out.set(path if os.path.isdir(path) else os.path.dirname(path))
@@ -362,7 +364,7 @@ class App(Base, ResolveTab):
         files = Card(page, "Files")
         files.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self._file_row(files, 1, "Timeline (AAF)", self.v_in, self._pick_input, "timeline")
-        self._file_row(files, 2, "Live template", self.v_tpl,
+        self._file_row(files, 2, "Live template (blank = built-in)", self.v_tpl,
                        lambda: self._pick(self.v_tpl, [("Live Set", "*.als")]), "template")
         ctk.CTkFrame(files, height=8, width=1, fg_color="transparent").grid(row=3, column=0)
 
@@ -692,8 +694,8 @@ class App(Base, ResolveTab):
     def _run(self):
         if not self.tl:
             return self._log("! Load or drop an AAF / FCPXML first.")
-        if not os.path.isfile(self.v_tpl.get()):
-            return self._log("! Pick or drop your Live template set (.als).")
+        if self.v_tpl.get() and not os.path.isfile(self.v_tpl.get()):
+            return self._log("! The Live template file isn't there. Clear the field to use the built-in one.")
         adding = self.v_mode.get() == "Add to existing project"
         if adding and not os.path.isdir(self.v_proj.get()):
             return self._log("! Choose or drop the Live project folder to add to.")
@@ -713,7 +715,7 @@ class App(Base, ResolveTab):
                              video_clips=self.v_vclips.get(), video_markers=self.v_vmarks.get(),
                              video_handles=self._handles(), video_full_extent=self.v_full.get())
         opt = importer.ImportOptions(
-            template=self.v_tpl.get(), out_dir=self.v_out.get(), set_name=self.v_name.get(),
+            template=template_mod.resolve(self.v_tpl.get()), out_dir=self.v_out.get(), set_name=self.v_name.get(),
             tempo=tempo, offset_tc=self.v_offset.get() or None, selected=selected,
             sample_rate=int(self.v_sr.get()),
             existing_project=self.v_proj.get() if adding else None,

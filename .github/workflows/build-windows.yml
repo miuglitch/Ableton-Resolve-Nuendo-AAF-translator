@@ -41,7 +41,7 @@ jobs:
           echo "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
           # python3.dll: Resolve's scripting library (fusionscript.dll) loads through it
           $py3 = python -c "import sys, os; print(os.path.join(sys.base_prefix, 'python3.dll'))"
-          pyinstaller --noconfirm --onefile --windowed --name "MIUGLITCH AAF Translator" --collect-all customtkinter --collect-all tkinterdnd2 --add-binary "$py3;." app.py
+          pyinstaller --noconfirm --onefile --windowed --name "MIUGLITCH AAF Translator" --collect-all customtkinter --collect-all tkinterdnd2 --add-binary "$py3;." --add-data "bridge/assets;bridge/assets" app.py
           Get-Item "dist/MIUGLITCH AAF Translator.exe" | Select-Object Name, Length
 
       - uses: actions/upload-artifact@v4

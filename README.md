@@ -56,7 +56,7 @@ Audio: one Live track per Resolve audio track (same name), clips cut with head/t
 handles or whole files, optional normalising (as clip gain), clip gain/fades/volume
 automation read from an AAF Resolve exports in the background (automation goes to a
 Utility's Gain). Gain staging: tracks at -18 dB and +18 dB Utility on the Main track.
-**Put one Utility (at 0 dB) on the template's audio track** so the app can copy it.
+The app carries its own Live 12 base set (bridge/assets/TranslatorTemplate.als), so no template has to be picked; your own template is optional under Advanced. The new set opens in Live when done.
 
 The .bridge.json next to the set records every shot's source file and source
 timecode, for a later re-conform.

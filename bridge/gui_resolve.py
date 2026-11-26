@@ -9,11 +9,27 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from . import importer, resolve_api, resolve_live
+from . import importer, resolve_api, resolve_live, template
 from .media import SAMPLE_RATES
 from .timecode import seconds_to_tc
 
 TAB = "Resolve → Live"
+DEFAULT_OUT = os.path.join(os.path.expanduser("~"), "Documents", "MIUGLITCH Live Sets")
+
+
+def open_file(path):
+    """Open with the default app (Live for .als)."""
+    import subprocess
+    import sys
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)                         # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
 NEW, ADD = "New Live project", "Add to existing project"
 FULL_LBL = "Full timeline, cut at each shot"
 HANDLES_LBL = "Per shot, with real source handles"
@@ -50,9 +66,9 @@ class ResolveTab:
         # --- template + destination -------------------------------------------
         dest = Card(page, "Live Set")
         dest.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        self.rv_tpl = tk.StringVar(value=s.get("template", ""))
-        self._file_row(dest, 1, "Live template", self.rv_tpl,
-                       lambda: self._pick(self.rv_tpl, [("Live Set", "*.als")]), "rtpl")
+        self.rv_tpl = tk.StringVar(value=s.get("rv_template", ""))
+        self.rv_own = tk.BooleanVar(value=s.get("rv_own_template", False))
+        self.rv_open = tk.BooleanVar(value=s.get("rv_open_after", True))
         self.rv_mode = tk.StringVar(value=NEW)
         ctk.CTkSegmentedButton(dest, values=[NEW, ADD], variable=self.rv_mode,
                                command=lambda v: self._rv_mode_changed(),
@@ -60,7 +76,7 @@ class ResolveTab:
                                selected_hover_color="#66666c", unselected_color=FIELD,
                                unselected_hover_color=LINE, text_color=TEXT, corner_radius=6
                                ).grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(6, 6))
-        self.rv_out = tk.StringVar(value=s.get("resolve_out_dir", s.get("out_dir", "")))
+        self.rv_out = tk.StringVar(value=s.get("resolve_out_dir") or DEFAULT_OUT)
         self.rv_new_fr = ctk.CTkFrame(dest, fg_color="transparent")
         self.rv_new_fr.grid(row=3, column=0, columnspan=3, sticky="ew")
         self.rv_new_fr.columnconfigure(1, weight=1)
@@ -181,9 +197,22 @@ class ResolveTab:
         check(ac, "Tracks at -18 dB, +18 dB Utility on the Main track (needs a Utility in the template)",
               self.rv_stage).grid(row=6, column=0, columnspan=3, sticky="w", padx=14, pady=(4, 12))
 
+        # --- advanced ---------------------------------------------------------------
+        adv = Card(page, "Advanced")
+        adv.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        check(adv, "Use my own Live template instead of the built-in one", self.rv_own).grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 6))
+        self.rv_tpl_fr = ctk.CTkFrame(adv, fg_color="transparent")
+        self.rv_tpl_fr.columnconfigure(1, weight=1)
+        self._file_row(self.rv_tpl_fr, 0, "Live template", self.rv_tpl,
+                       lambda: self._pick(self.rv_tpl, [("Live Set", "*.als")]), "rtpl")
+        self.rv_own.trace_add("write", lambda *a: self._rv_own_state())
+        self._rv_own_state()
+        ctk.CTkFrame(adv, height=6, width=1, fg_color="transparent").grid(row=3, column=0)
+
         # --- go --------------------------------------------------------------------
         run = ctk.CTkFrame(page, fg_color="transparent")
-        run.grid(row=4, column=0, sticky="ew", pady=(4, 6))
+        run.grid(row=5, column=0, sticky="ew", pady=(4, 6))
         run.columnconfigure(1, weight=1)
         self.rv_go = button(run, "Build Live Set from Resolve", self._rv_run, primary=True, width=260)
         self.rv_go.grid(row=0, column=0, sticky="w")
@@ -192,10 +221,12 @@ class ResolveTab:
         self.rv_bar.grid(row=0, column=1, sticky="ew", padx=(16, 0))
         self.rv_step = label(run, "")
         self.rv_step.grid(row=1, column=1, sticky="w", padx=(16, 0))
+        check(run, "Open the new set in Live when it's done", self.rv_open).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.rv_log = ctk.CTkTextbox(page, height=180, fg_color=PANEL, text_color=TEXT,
                                      border_width=1, border_color=LINE, font=ctk.CTkFont("Consolas", 12),
                                      corner_radius=8)
-        self.rv_log.grid(row=5, column=0, sticky="ew", pady=(6, 4))
+        self.rv_log.grid(row=6, column=0, sticky="ew", pady=(6, 4))
 
     # -- helpers ---------------------------------------------------------------------
     def _rv_say(self, m):
@@ -211,6 +242,12 @@ class ResolveTab:
         else:
             t = "Fastest: Resolve renders the whole timeline once. Handles show what's next to the shot in the edit."
         self.rv_mode_hint.configure(text=t)
+
+    def _rv_own_state(self):
+        if self.rv_own.get():
+            self.rv_tpl_fr.grid(row=2, column=0, columnspan=3, sticky="ew")
+        else:
+            self.rv_tpl_fr.grid_remove()
 
     def _rv_whole_state(self):
         from .gui import DIM, TEXT
@@ -316,14 +353,20 @@ class ResolveTab:
 
     # -- build ---------------------------------------------------------------------
     def _rv_run(self):
-        tpl = self.rv_tpl.get()
-        if not os.path.isfile(tpl):
-            return self._rv_say("! Pick or drop your Live template set (.als).")
+        own = self.rv_own.get()
+        if own and not os.path.isfile(self.rv_tpl.get()):
+            return self._rv_say("! Pick your own Live template (.als), or untick it to use the built-in one.")
+        tpl = template.resolve(self.rv_tpl.get() if own else None)
         adding = self.rv_mode.get() == ADD
         if adding and not os.path.isdir(self.rv_proj.get()):
             return self._rv_say("! Choose or drop the Live project folder to add to.")
-        if not adding and not os.path.isdir(self.rv_out.get()):
-            return self._rv_say("! Choose the folder to save the Live project in.")
+        if not adding:
+            if not self.rv_out.get():
+                self.rv_out.set(DEFAULT_OUT)
+            try:
+                os.makedirs(self.rv_out.get(), exist_ok=True)
+            except OSError as e:
+                return self._rv_say(f"! Can't use that save folder: {e}")
         try:
             tempo = float(self.rv_tempo.get())
         except ValueError:
@@ -333,7 +376,8 @@ class ResolveTab:
         vs = self.rv_panel.get()
         chosen = [n for n, v in self.rv_track_vars if v.get()] if self.rv_track_vars else None
         self.settings.update(
-            template=tpl, tempo=tempo, sample_rate=int(self.rv_sr.get()),
+            rv_template=self.rv_tpl.get(), rv_own_template=own, rv_open_after=self.rv_open.get(),
+            tempo=tempo, sample_rate=int(self.rv_sr.get()),
             rv_video=self.rv_video.get(), rv_render_mode="handles" if handles else "full",
             rv_video_head=self._num(self.rv_vhead, 2.0), rv_video_tail=self._num(self.rv_vtail, 2.0),
             rv_shot_markers=self.rv_shotmarks.get(), rv_resolve_markers=self.rv_rmarks.get(),
@@ -344,8 +388,6 @@ class ResolveTab:
             rv_gain_staging=self.rv_stage.get())
         if not adding:
             self.settings["resolve_out_dir"] = self.rv_out.get()
-        if hasattr(self, "v_tpl") and not self.v_tpl.get():
-            self.v_tpl.set(tpl)
         from .gui import save_settings
         save_settings(self.settings)
         sv = self.settings
@@ -362,6 +404,7 @@ class ResolveTab:
             normalize_db=sv["rv_normalize_db"], read_aaf=sv["rv_read_aaf"], gain_staging=sv["rv_gain_staging"],
             log=lambda m: self.after(0, self._rv_say, m),
             progress=lambda fr, t="": self.after(0, self._rv_prog, fr, t))
+        opt_open = self.rv_open.get()
         self.rv_go.configure(state="disabled", text="Working…")
         self.rv_bar.set(0)
 
@@ -374,6 +417,9 @@ class ResolveTab:
                 self.after(0, self._rv_say, f"✓ Live Set created: {res.als_path}")
                 self.after(0, self._rv_say, f"  {len(res.warnings)} warning(s), report saved next to the set.")
                 self.after(0, self._rv_project_changed)
+                if opt_open:
+                    self.after(0, self._rv_say, "Opening it in Live…")
+                    open_file(res.als_path)
             except resolve_api.ResolveError as e:
                 self.after(0, self._rv_say, f"✗ {e}")
             except Exception as e:

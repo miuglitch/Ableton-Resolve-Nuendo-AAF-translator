@@ -212,3 +212,21 @@ def test_utility_automation(env):
     assert env_.find("EnvelopeTarget/PointeeId").get("Value") == tgt
     vals = [float(e.get("Value")) for e in env_.iter("FloatEvent")]
     assert -6.0 in vals and 3.0 in vals and vals[0] == 0.0
+
+
+def test_builtin_template(env):
+    """The Live 12 set shipped inside the app: master already has +18 dB."""
+    from bridge import template
+    tpl = template.builtin()
+    assert os.path.isfile(tpl)
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "builtin", tpl=tpl)
+    root = load(res.als_path)
+    main = root.find("LiveSet/MainTrack/DeviceChain/DeviceChain/Devices")
+    assert len(main.findall("StereoGain")) == 1                     # not doubled
+    tracks = {t.find("Name/EffectiveName").get("Value"): t for t in root.iter("AudioTrack")}
+    assert set(tracks) == {"Video 1", "Dialogue", "Ambience"}       # template's own track is gone
+    u = tracks["Dialogue"].find("DeviceChain/DeviceChain/Devices/StereoGain")
+    assert abs(float(u.find("Gain/Manual").get("Value")) - 1.0) < 1e-6   # linear 0 dB in Live 12
+    ids = [e.get("Id") for e in root.iter() if e.get("Id") and (e.tag.endswith("Target"))]
+    assert len(ids) == len(set(ids))                                # pointee ids stay unique
+    assert not res.warnings or all("AAF" in w for w in res.warnings)
