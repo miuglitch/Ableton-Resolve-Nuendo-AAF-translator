@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 from . import sidecar as sc
-from .als.writer import AlsBuilder, LIVE_COLORS, VIDEO_COLORS
+from .als.writer import AlsBuilder, LIVE_COLORS, MISSING_COLOR, VIDEO_COLORS
 from .importer import _safe, _unique, project_sidecar, target_paths, ImportOptions
 from .media import MediaConverter, peak_db, probe, source_timecode
 from .model import Clip, Marker, Timeline, Track
@@ -75,6 +75,9 @@ class Options:
     shot_markers: bool = True
     resolve_markers: bool = True
     mix_track: bool = False                # also one continuous stereo-mix track
+    continuous: bool = True                # one video of the whole timeline on one track (plays smoothly)
+    shot_clips: bool = False               # also one video clip per shot, on the Resolve track names
+    shot_track: bool = True                # a track with one empty clip per shot, to grab and loop
     render_preset: str = ""                # optional Resolve render preset (e.g. for H.264 key frames)
     # audio
     audio: bool = True
@@ -564,8 +567,8 @@ def audio_timeline(rt: ResolveTimeline, names: list[str] | None) -> Timeline:
         t.selected = names is None or tname in names
         for ri in sorted((i for i in rt.audio_items if i.track_index == idx), key=lambda i: i.start):
             if not ri.file:
-                tl.warnings.append(f"{tname} / {ri.name}: no media file (Fairlight/generated audio) — skipped.")
-                continue
+                tl.warnings.append(f"{tname} / {ri.name}: no media file in Resolve, a red placeholder clip "
+                                   "marks it in Live.")
             t.clips.append(Clip(name=ri.name, start=rt.sec(ri.start), duration=rt.sec(ri.end - ri.start),
                                 source_path=ri.file, source_in=ri.source_in, channels=list(ri.channels),
                                 enabled=ri.enabled, speed=ri.speed))
@@ -583,6 +586,49 @@ def audio_timeline(rt: ResolveTimeline, names: list[str] | None) -> Timeline:
         tl.markers.append(Marker(time=rt.sec(m.frame), name=m.name, note=m.note,
                                  duration=rt.sec(m.duration)))
     return tl
+
+
+def add_shot_track(b, rt: ResolveTimeline, shots, offset, project_dir, sr, warnings):
+    """One empty clip per shot, named after it, to select / loop / drag in Live.
+    MIDI clips when the template has a MIDI track to copy, otherwise silent audio clips."""
+    if not shots:
+        return
+    if b.midi_proto is not None:
+        b.add_midi_track("SHOTS", [(rt.sec(s.start) - offset, rt.sec(s.end - s.start), s.name,
+                                    VIDEO_COLORS[k % 2]) for k, s in enumerate(shots)
+                                   if rt.sec(s.start) >= offset], LIVE_COLORS["VIDEO"])
+        return
+    from .media import tool, _run
+    d = os.path.join(project_dir, "Samples", "Imported", "_shots")
+    os.makedirs(d, exist_ok=True)
+    longest = max(float(rt.sec(s.end - s.start)) for s in shots)
+    wav = os.path.join(d, "shot (silence).wav")
+    r = _run([tool("ffmpeg"), "-y", "-v", "error", "-f", "lavfi", "-t", f"{longest + 0.1:.6f}",
+              "-i", f"anullsrc=r={sr}:cl=mono", "-c:a", "pcm_s16le", wav])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[-200:])
+    clips = []
+    for k, s in enumerate(shots):
+        c = Clip(name=s.name, start=rt.sec(s.start), duration=rt.sec(s.end - s.start), source_path=wav,
+                 source_in=Fraction(0))
+        c.wav_path = wav
+        c.color = VIDEO_COLORS[k % 2]
+        clips.append(c)
+    b.add_track("SHOTS", clips, offset, LIVE_COLORS["VIDEO"], warnings)
+
+
+def placeholder_wav(media_dir: str, c: Clip, n: int, sr: int) -> str:
+    """A silent WAV as long as the missing clip, so Live shows where it was."""
+    from .media import tool, _run
+    d = os.path.join(media_dir, "_missing")
+    os.makedirs(d, exist_ok=True)
+    base = _safe(os.path.splitext(c.name or os.path.basename(c.source_path) or "clip")[0])[:40]
+    out = os.path.join(d, f"MISSING_{n:03d}_{base}.wav")
+    r = _run([tool("ffmpeg"), "-y", "-v", "error", "-f", "lavfi", "-t", f"{float(c.duration) + 0.01:.6f}",
+              "-i", f"anullsrc=r={sr}:cl=stereo", "-c:a", "pcm_s24le", out])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[-200:])
+    return out
 
 
 def enrich_from_aaf(tl: Timeline, aaf_tl: Timeline, log) -> tuple[int, int]:
@@ -670,6 +716,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
     warnings += tl.warnings
     shots = plan_shots(rt) if opt.video else []
     shot_records = []
+    picture_file = ""
 
     # ---------------- picture ----------------
     if opt.video and shots:
@@ -717,7 +764,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                 with Renderer(resolve, rt, fmt, codec, log, lambda f, t="": say(0.05 + 0.6 * f, t),
                               preset=preset, frame_rate=rate_) as R:
                     htl, placed = None, {}
-                    if opt.render_mode == MODE_HANDLES:
+                    if opt.shot_clips and opt.render_mode == MODE_HANDLES:
                         try:
                             log("Building the temporary handles timeline in Resolve…")
                             htl, placed = build_handles_timeline(resolve, rt, shots, head, tail, log)
@@ -725,7 +772,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                             warnings.append(f"Real handles not possible ({e}); handles come from the edit.")
                             placed = {}
                     try:
-                        for s in shots:
+                        for s in (shots if opt.shot_clips else []):
                             track_name = rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}")
                             nm = f"{_safe(track_name)}_{s.index:03d}_{_safe(s.name)[:50]}"
                             p = {"track": track_name, "name": nm}
@@ -743,6 +790,10 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                                 p.update(kind="edit", pre=s.start - a, post=e - s.end,
                                          jobs=[R.queue(rt.obj, pdir if convert_to else vdir, nm, a, e, size)])
                             plan[s.index] = p
+                        pic_job = None
+                        if opt.continuous:
+                            pic_job = R.queue(rt.obj, pdir if convert_to else vdir, f"{tag}_picture",
+                                              rt.start, rt.end, size)
                         mix_job = None
                         if opt.mix_track:
                             try:
@@ -770,8 +821,36 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                                 "computer doesn't have).")
                 log("! Preset render failed, rendering ProRes Proxy and converting instead…")
 
+        if pic_job:
+            dst = files[pic_job]
+            ok = True
+            if convert_to:
+                from .video import CODECS
+                final = os.path.join(vdir, f"{tag}_picture" + CODECS[convert_to][0])
+                say(0.66, "Converting the picture to H.264")
+                try:
+                    dst = h264_every_frame(dst, final)
+                except Exception as e:
+                    warnings.append(f"Picture: H.264 conversion failed ({e}).")
+                    ok = False
+            if ok:
+                pc = Clip(name=rt.name, start=rt.sec(rt.start), duration=rt.sec(rt.end - rt.start),
+                          source_path=dst, source_in=Fraction(0))
+                pc.wav_path = dst
+                b.add_track("PICTURE", [pc], offset, LIVE_COLORS["VIDEO"], warnings, volume_db=level)
+                picture_file = os.path.abspath(dst)
+
         per_track: dict[int, list[Clip]] = {}
         for n, s in enumerate(shots):
+            if s.index not in plan:                  # no per-shot clip: just remember the shot
+                shot_records.append({
+                    "index": s.index, "name": s.name,
+                    "track": rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}"),
+                    "start": sc._f(rt.sec(s.start)), "duration": sc._f(sec(s.end - s.start)),
+                    "source": s.item.file, "source_in": sc._f(s.source_in) if s.item.file else "0/1",
+                    "source_tc": shot_tc(rt, s), "speed": sc._f(Fraction(s.item.speed)),
+                    "resolve_item": s.item.uid, "overlays": [o.name for o in s.overlays]})
+                continue
             p = plan[s.index]
             say(0.65 + 0.15 * n / len(shots), "Collecting clips")
             parts = [files[j] for j in p["jobs"]]
@@ -825,6 +904,12 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                       source_path=mix, source_in=Fraction(0))
             mc.wav_path = mix
             b.add_track("STEREO MIX", [mc], offset, LIVE_COLORS["PICTURE"], warnings, volume_db=level)
+
+        if opt.shot_track:
+            try:
+                add_shot_track(b, rt, shots, offset, project_dir, opt.sample_rate, warnings)
+            except Exception as e:
+                warnings.append(f"Shot track not made: {e}")
     elif opt.video:
         warnings.append("No video clips on the Resolve timeline, so no picture was made.")
 
@@ -871,9 +956,22 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                     conv.warnings.append(f"{t.name} / {c.name}: {e}")
                     c.wav_path = None
         warnings += conv.warnings
+        missing = [(t, c) for t, c in clips if not c.wav_path]
+        for k, (t, c) in enumerate(missing, start=1):
+            try:
+                c.wav_path = placeholder_wav(media_dir, c, k, opt.sample_rate)
+                c.wav_offset = -c.source_in
+                c.name = f"MISSING: {c.name or os.path.basename(c.source_path) or 'clip'}"
+                c.color = MISSING_COLOR
+                c.gain_db = 0.0
+            except Exception as e:
+                warnings.append(f"{t.name} / {c.name}: no placeholder clip ({e})")
+        if missing:
+            log(f"{len(missing)} clip{'s' if len(missing) != 1 else ''} with missing media → red placeholder "
+                "clips (their volume automation is still written)")
         if opt.normalize:
             for t, c in clips:
-                if not c.wav_path:
+                if not c.wav_path or c.color == MISSING_COLOR:
                     continue
                 pk = peak_db(c.wav_path, float(c.source_in + c.wav_offset), float(c.duration))
                 if pk is not None:
@@ -912,6 +1010,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                     "render_mode": opt.render_mode if opt.video else "",
                     "built": time.strftime("%Y-%m-%d %H:%M:%S")}
     side.shots = shot_records
+    side.resolve["picture"] = picture_file
     if earlier:
         side.media = list(earlier.media)
     if conv:
@@ -933,7 +1032,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
         fh.write(f"Audio at {opt.sample_rate} Hz\n\nShots ({len(shot_records)}):\n")
         for r in shot_records:
             fh.write(f"  {r['index']:3d}  {r['track']}  {r['name']}  src {r['source_tc'] or '-'}  "
-                     f"handles from {r['handles']}" + (f"  (+ {', '.join(r['overlays'])})" if r['overlays'] else "")
+                     + (f"handles from {r['handles']}" if r.get('handles') else "") + (f"  (+ {', '.join(r['overlays'])})" if r['overlays'] else "")
                      + "\n")
         fh.write("\nAudio tracks:\n")
         for t in tl.audio_tracks:

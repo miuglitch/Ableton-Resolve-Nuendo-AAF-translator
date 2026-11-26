@@ -124,8 +124,19 @@ class ResolveTab:
         pc = Card(page, "Picture")
         pc.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         self.rv_video = tk.BooleanVar(value=s.get("rv_video", True))
-        check(pc, "Bring the picture: Resolve renders it (grade, Fusion, titles), one Live clip per shot",
-              self.rv_video).grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 8))
+        top = ctk.CTkFrame(pc, fg_color="transparent")
+        top.grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 8))
+        self.rv_cont = tk.BooleanVar(value=s.get("rv_continuous", True))
+        self.rv_shotclips = tk.BooleanVar(value=s.get("rv_shot_clips", False))
+        self.rv_shottrack = tk.BooleanVar(value=s.get("rv_shot_track", True))
+        check(top, "Bring the picture: Resolve renders it (grade, Fusion, titles)", self.rv_video).pack(
+            anchor="w", pady=(0, 6))
+        check(top, "One continuous video of the whole timeline on one track (plays smoothly in Live)",
+              self.rv_cont).pack(anchor="w", padx=(24, 0), pady=2)
+        check(top, "SHOTS track: one empty clip per shot, named, to grab and loop",
+              self.rv_shottrack).pack(anchor="w", padx=(24, 0), pady=2)
+        check(top, "Also one video clip per shot, with handles (set below)",
+              self.rv_shotclips).pack(anchor="w", padx=(24, 0), pady=2)
         self.rv_rmode = tk.StringVar(value=HANDLES_LBL if s.get("rv_render_mode") == "handles" else FULL_LBL)
         ctk.CTkSegmentedButton(pc, values=[FULL_LBL, HANDLES_LBL], variable=self.rv_rmode,
                                font=f(12, "bold"), fg_color=FIELD, selected_color="#5a5a60",
@@ -417,6 +428,8 @@ class ResolveTab:
             rv_template=self.rv_tpl.get(), rv_own_template=own, rv_open_live=self.rv_open.get(),
             tempo=tempo, sample_rate=int(self.rv_sr.get()),
             rv_video=self.rv_video.get(), rv_render_mode="handles" if handles else "full",
+            rv_continuous=self.rv_cont.get(), rv_shot_clips=self.rv_shotclips.get(),
+            rv_shot_track=self.rv_shottrack.get(),
             rv_video_head=self._num(self.rv_vhead, 2.0), rv_video_tail=self._num(self.rv_vtail, 2.0),
             rv_shot_markers=self.rv_shotmarks.get(), rv_resolve_markers=self.rv_rmarks.get(),
             rv_mix_track=self.rv_mix.get(), rv_render_preset=self.rv_preset.get().strip(),
@@ -434,6 +447,7 @@ class ResolveTab:
             template=tpl, out_dir=self.rv_out.get(), set_name=self.rv_name.get(), tempo=tempo,
             sample_rate=int(self.rv_sr.get()), existing_project=self.rv_proj.get() if adding else None,
             base_set=self._rv_base_path() if adding else None, note=self.rv_note.get(),
+            continuous=sv["rv_continuous"], shot_clips=sv["rv_shot_clips"], shot_track=sv["rv_shot_track"],
             video=sv["rv_video"], render_mode=resolve_live.MODE_HANDLES if handles else resolve_live.MODE_FULL,
             video_head=sv["rv_video_head"], video_tail=sv["rv_video_tail"], video_settings=vs,
             shot_markers=sv["rv_shot_markers"], resolve_markers=sv["rv_resolve_markers"],

@@ -112,6 +112,9 @@ def _run(env, mode, sub, tpl=None, **kw):
     rv = fr.Resolve(make_timeline(os.path.join(d, "media")))
     rt = resolve_api.read(rv)
     kw.setdefault("video_settings", VideoSettings(codec="H.264 (.mp4)", resolution="360p"))
+    kw.setdefault("continuous", False)
+    kw.setdefault("shot_clips", True)
+    kw.setdefault("shot_track", False)
     opt = resolve_live.Options(template=tpl or env["tpl"], out_dir=d, render_mode=mode, video_head=1.0,
                                video_tail=1.0, audio_head=0.5, audio_tail=0.5,
                                log=lambda m: None, **kw)
@@ -312,3 +315,60 @@ def test_preset_render_fails_falls_back(env, monkeypatch):
 def test_shipped_preset_is_every_frame():
     path = resolve_live.preset_file()
     assert path and "<DbKey>h264_iframefreq</DbKey>" in open(path).read()
+
+
+def test_missing_media_placeholder_and_automation(env, monkeypatch):
+    """An offline clip on the music track: red placeholder, automation still on the Utility."""
+    from bridge.model import VolumePoint
+    real = resolve_live.audio_timeline
+
+    def with_missing(rt, names):
+        tl = real(rt, names)
+        from bridge.model import Clip, Track
+        t = Track(name="Music", kind="audio")
+        c = Clip(name="song.wav", start=rt.sec(90050), duration=Fraction(3), source_path="/nowhere/song.wav",
+                 source_in=Fraction(0), channels=[1, 2])
+        c.volume = [VolumePoint(Fraction(0), -10.0), VolumePoint(Fraction(2), 0.0)]
+        t.clips.append(c)
+        tl.tracks.append(t)
+        return tl
+    monkeypatch.setattr(resolve_live, "audio_timeline", with_missing)
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "missing", tpl=__import__("bridge.template", fromlist=["x"]).builtin(),
+                       video=False)
+    root = load(res.als_path)
+    music = next(t for t in root.iter("AudioTrack") if t.find("Name/EffectiveName").get("Value") == "Music")
+    clip = next(music.iter("AudioClip"))
+    assert clip.find("Name").get("Value") == "MISSING: song.wav"
+    assert clip.find("Color").get("Value") == "14"
+    tgt = music.find("DeviceChain/DeviceChain/Devices/StereoGain/Gain/AutomationTarget").get("Id")
+    env_ = music.find("AutomationEnvelopes/Envelopes/AutomationEnvelope")
+    assert env_.find("EnvelopeTarget/PointeeId").get("Value") == tgt
+    vals = [round(float(e.get("Value")), 3) for e in env_.iter("FloatEvent")]
+    assert round(10 ** (-10 / 20), 3) in vals                       # -10 dB, Live 12 linear Utility gain
+
+
+def test_continuous_picture_and_midi_shots(env):
+    """Default: one continuous video on PICTURE, plus a MIDI SHOTS track with one empty clip per shot."""
+    from bridge import template
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "continuous", tpl=template.builtin(), audio=False,
+                       continuous=True, shot_clips=False, shot_track=True)
+    root = load(res.als_path)
+    audio = {t.find("Name/EffectiveName").get("Value"): t for t in root.iter("AudioTrack")}
+    assert list(audio) == ["PICTURE"]
+    pic = list(audio["PICTURE"].iter("AudioClip"))
+    assert len(pic) == 1
+    f = pic[0].find("SampleRef/FileRef/Path").get("Value")
+    assert abs(duration(f) - 10.0) < 0.1                              # whole timeline
+    assert near(pixel(f, 2.0), fr.color_of("snow")) and near(pixel(f, 6.0), fr.color_of("GX010030.MP4"))
+    midi = [t for t in root.iter("MidiTrack")]
+    assert [m.find("Name/EffectiveName").get("Value") for m in midi] == ["SHOTS"]
+    clips = list(midi[0].iter("MidiClip"))
+    assert [c.find("Name").get("Value") for c in clips] == ["snow", "GX010030"]
+    # 120 BPM: shot 1 = 0..4 s = 0..8 beats, shot 2 = 4..10 s = 8..20 beats
+    assert [(float(c.find("CurrentStart").get("Value")), float(c.find("CurrentEnd").get("Value"))) for c in clips] \
+        == [(0.0, 8.0), (8.0, 20.0)]
+    assert not list(clips[0].iter("MidiNoteEvent"))
+    ids = [e.get("Id") for e in root.iter() if e.get("Id") and e.tag.endswith("Target")]
+    assert len(ids) == len(set(ids))
+    side = json.load(open(res.als_path[:-4] + ".bridge.json"))
+    assert len(side["shots"]) == 2 and side["resolve"]["picture"].endswith(".mp4")

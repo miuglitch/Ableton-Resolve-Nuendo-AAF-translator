@@ -68,7 +68,8 @@ LIVE_COLORS = {"ORIG": 8,       # audio from Resolve: sky blue
                "PICTURE": 27,   # picture reference: grey
                "SD": 2,         # new sound design (not set by the app)
                None: 8}
-VIDEO_COLORS = (21, 13)          # video clips alternate: cyan, white
+VIDEO_COLORS = (21, 13)
+MISSING_COLOR = 14               # red: placeholder for media that wasn't found          # video clips alternate: cyan, white
 
 
 def load_als(path: str) -> etree._ElementTree:
@@ -182,6 +183,15 @@ class AlsBuilder:
         if util is None:
             util = tpl.find(".//StereoGain")
         self.utility_proto = copy.deepcopy(util) if util is not None else None
+        # MIDI track + clip written by Live (optional): for the empty per-shot clips
+        mts = tpl.find("Tracks").findall("MidiTrack")
+        mclip = None
+        if mts:
+            mclip = mts[0].find(".//MidiClip")
+        if mclip is None:
+            mclip = tpl.find(".//MidiClip")
+        self.midi_proto = copy.deepcopy(mts[0]) if (mts and mclip is not None) else None
+        self.midi_clip_proto = copy.deepcopy(mclip) if mclip is not None else None
         loc = tpl.find("Locators/Locators/Locator")
         self.locator_proto = copy.deepcopy(loc) if loc is not None else None
 
@@ -379,9 +389,11 @@ class AlsBuilder:
         cid = 0
         auto_points = []
         for c in clips:
-            if not c.wav_path:
-                continue
             live_start = c.start - offset
+            if not c.wav_path:
+                if c.volume and live_start >= 0:          # media missing: keep its automation
+                    auto_points.append((live_start, c))
+                continue
             if live_start < 0:
                 if warnings is not None:
                     warnings.append(f"{name} / {c.name}: starts before the offset point — skipped. "
@@ -401,6 +413,76 @@ class AlsBuilder:
             else:
                 self._volume_envelope(t, envs, auto_points)
 
+        t.tail = "\n"
+        self.tracks_el.insert(self.insert_at, t)
+        self.insert_at += 1
+
+    def add_midi_track(self, name: str, items, color: int | None = None) -> None:
+        """items: (live start seconds, length seconds, clip name, colour). Empty MIDI clips."""
+        t = copy.deepcopy(self.midi_proto)
+        new_id = (max(self.track_ids) + 1) if self.track_ids else 8
+        self.track_ids.add(new_id)
+        t.set("Id", str(new_id))
+        devs = t.find("DeviceChain/DeviceChain/Devices")
+        if devs is not None:
+            for d in list(devs):
+                devs.remove(d)
+        for val in t.iter("ClipSlot"):                    # no Session clips
+            v = val.find("Value")
+            if v is not None:
+                for x in list(v):
+                    v.remove(x)
+        self.ids.renumber(t)
+        _v(t, "Name/EffectiveName", name)
+        _v(t, "Name/UserName", name)
+        if color is not None:
+            _v(t, "Color", color)
+        _v(t, "TrackGroupId", -1)
+        envs = t.find("AutomationEnvelopes/Envelopes")
+        if envs is not None:
+            for e in list(envs):
+                envs.remove(e)
+        events = None
+        for ev in t.iter("Events"):
+            par = ev.getparent()
+            if par is not None and par.tag == "ArrangerAutomation" and par.getparent() is not None \
+                    and par.getparent().tag in ("ClipTimeable", "MainSequencer", "Sample"):
+                events = ev
+                break
+        if events is None:
+            return
+        for e in list(events):
+            events.remove(e)
+        for cid, (start, length, cname, ccol) in enumerate(items):
+            el = copy.deepcopy(self.midi_clip_proto)
+            for slot in el.iter("ClipSlot"):
+                slot.getparent().remove(slot)
+            sb, lb = self.beats(start), self.beats(length)
+            el.set("Id", str(cid))
+            el.set("Time", _num(sb))
+            _v(el, "CurrentStart", sb)
+            _v(el, "CurrentEnd", sb + lb)
+            _v(el, "Loop/LoopStart", 0.0)
+            _v(el, "Loop/LoopEnd", lb)
+            _v(el, "Loop/StartRelative", 0.0)
+            _v(el, "Loop/LoopOn", False)
+            _v(el, "Loop/OutMarker", lb)
+            _v(el, "Loop/HiddenLoopStart", 0.0)
+            _v(el, "Loop/HiddenLoopEnd", lb)
+            _v(el, "Name", cname)
+            if ccol is not None:
+                _v(el, "Color", ccol)
+            _v(el, "Disabled", False)
+            kt = el.find("Notes/KeyTracks")
+            if kt is not None:
+                for k in list(kt):
+                    kt.remove(k)
+            ce = el.find("Envelopes/Envelopes")
+            if ce is not None:
+                for e in list(ce):
+                    ce.remove(e)
+            el.tail = "\n"
+            events.append(el)
         t.tail = "\n"
         self.tracks_el.insert(self.insert_at, t)
         self.insert_at += 1
