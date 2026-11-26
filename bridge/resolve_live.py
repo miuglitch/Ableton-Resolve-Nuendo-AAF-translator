@@ -361,6 +361,66 @@ def audio_format(project) -> tuple[str, str]:
     return fmt, (next(iter(codecs.values())) if codecs else "LinearPCM")
 
 
+LIVE_PRESET = "MIUGLITCH Live H264"
+
+
+def preset_file() -> str | None:
+    """The Resolve render preset shipped in bridge/assets (H.264, key frame every frame)."""
+    from .template import builtin
+    folder = os.path.dirname(builtin())
+    hits = sorted(glob.glob(os.path.join(glob.escape(folder), "*.xml")))
+    return hits[0] if hits else None
+
+
+def ensure_live_preset(resolve, project, log) -> str | None:
+    """Make sure Resolve has the app's H.264 preset; return its name, or None."""
+    def names():
+        try:
+            return [str(n) for n in (project.GetRenderPresetList() or [])]
+        except Exception:
+            return []
+    have = names()
+    if LIVE_PRESET in have:
+        return LIVE_PRESET
+    path = preset_file()
+    if not path:
+        return None
+    ok = False
+    for obj in (resolve, resolve.GetProjectManager()):
+        fn = getattr(obj, "ImportRenderPreset", None)
+        if fn is None:
+            continue
+        try:
+            ok = bool(fn(path))
+        except Exception:
+            ok = False
+        if ok:
+            break
+    after = names()
+    new = [n for n in after if n not in have]
+    if LIVE_PRESET in after:
+        log(f"Added the render preset '{LIVE_PRESET}' to Resolve")
+        return LIVE_PRESET
+    if new:
+        log(f"Added the render preset '{new[0]}' to Resolve")
+        return new[0]
+    return None
+
+
+def h264_every_frame(src: str, dst: str) -> str:
+    """Fallback only: H.264 with a key frame on every frame, from Resolve's all-intra render."""
+    from .media import tool, _run
+    mp4 = dst.lower().endswith(".mp4")
+    r = _run([tool("ffmpeg"), "-y", "-v", "error", "-i", src, "-map", "0:v:0", "-map", "0:a?",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+              "-g", "1", "-keyint_min", "1", "-sc_threshold", "0", "-bf", "0",
+              "-c:a", "aac" if mp4 else "pcm_s16le", *(["-b:a", "256k"] if mp4 else []),
+              "-movflags", "+faststart", dst])
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[-300:])
+    return dst
+
+
 def join_copy(parts: list[str], dst: str) -> str:
     """Join Resolve's head / body / tail renders into one file without
     re-encoding (same format, each piece starts on a key frame)."""
@@ -608,21 +668,37 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
         from .video import VideoSettings, target_size
         vs = opt.video_settings or VideoSettings()
         size = target_size(vs, rt.width, rt.height)
-        fmt, codec = resolve_format(rt.project_obj, vs.codec)
         rate = None if vs.frame_rate == "Same as source" else vs.frame_rate
+        preset, convert_to = opt.render_preset, None
+        if not preset and vs.codec.startswith("H.264"):
+            # Live needs a key frame on every frame. Resolve's scripting can't set
+            # that, but a render preset can: use the one shipped with the app.
+            preset = ensure_live_preset(resolve, rt.project_obj, log)
+            if not preset:
+                convert_to = vs.codec        # Resolve renders all-intra, app makes H.264 from it
+                warnings.append("Resolve's H.264 key-frame preset couldn't be loaded, so Resolve rendered "
+                                "ProRes Proxy and the app converted each clip to H.264 with a key frame "
+                                "on every frame.")
+        if convert_to:
+            try:
+                fmt, codec = resolve_format(rt.project_obj, "ProRes 422 Proxy (.mov)")
+            except ResolveError:
+                fmt, codec = resolve_format(rt.project_obj, "DNxHR LB (.mov)")
+        else:
+            fmt, codec = resolve_format(rt.project_obj, vs.codec)
         vdir = os.path.join(project_dir, "Samples", "Video")
         pdir = os.path.join(vdir, "_parts")
         head = int(round(Fraction(str(max(0.0, opt.video_head))) * fps))
         tail = int(round(Fraction(str(max(0.0, opt.video_tail))) * fps))
         log(f"{len(shots)} shots · Resolve renders {vs.codec} {size[0]}x{size[1]}"
-            + (f" via preset '{opt.render_preset}'" if opt.render_preset else "")
+            + (f" via preset '{preset}'" if preset else "")
             + f" · handles {opt.video_head:g}s / {opt.video_tail:g}s · "
             + ("real source handles" if opt.render_mode == MODE_HANDLES else "handles from the edit"))
         tag = _safe(rt.name)[:40]
         sec = lambda fr: Fraction(fr) / fps          # noqa: E731
         plan = {}                                    # shot index -> dict
         with Renderer(resolve, rt, fmt, codec, log, lambda f, t="": say(0.05 + 0.6 * f, t),
-                      preset=opt.render_preset, frame_rate=rate) as R:
+                      preset=preset, frame_rate=rate) as R:
             htl, placed = None, {}
             if opt.render_mode == MODE_HANDLES:
                 try:
@@ -648,7 +724,7 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                     else:
                         a, e = max(rt.start, s.start - head), min(rt.end, s.end + tail)
                         p.update(kind="edit", pre=s.start - a, post=e - s.end,
-                                 jobs=[R.queue(rt.obj, vdir, nm, a, e, size)])
+                                 jobs=[R.queue(rt.obj, pdir if convert_to else vdir, nm, a, e, size)])
                     plan[s.index] = p
                 mix_job = None
                 if opt.mix_track:
@@ -673,11 +749,13 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
             p = plan[s.index]
             say(0.65 + 0.15 * n / len(shots), "Collecting clips")
             parts = [files[j] for j in p["jobs"]]
-            if len(parts) == 1 and p["kind"] == "edit":
+            if len(parts) == 1 and p["kind"] == "edit" and not convert_to:
+                dst = parts[0]
+            elif len(parts) == 1:
                 dst = parts[0]
             else:
                 ext = os.path.splitext(parts[-1])[1]
-                dst = os.path.join(vdir, p["name"] + ext)
+                dst = os.path.join(pdir if convert_to else vdir, p["name"] + ext)
                 try:
                     join_copy(parts, dst)
                 except Exception as e:
@@ -686,6 +764,15 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                     body = files[p["jobs"][1 if p["pre"] else 0]]
                     shutil.copy2(body, dst)
                     p["pre"] = p["post"] = 0
+            if convert_to:
+                from .video import CODECS
+                final = os.path.join(vdir, p["name"] + CODECS[convert_to][0])
+                try:
+                    h264_every_frame(dst, final)
+                    dst = final
+                except Exception as e:
+                    warnings.append(f"Shot {s.index} {s.name}: H.264 conversion failed ({e}).")
+                    continue
             vc = Clip(name=s.name, start=rt.sec(s.start), duration=sec(s.end - s.start), source_path=dst,
                       source_in=sec(p["pre"]))
             vc.wav_path = dst

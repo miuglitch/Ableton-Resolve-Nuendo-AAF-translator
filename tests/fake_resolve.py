@@ -158,8 +158,12 @@ class Project:
                       "Apple ProRes 422 Proxy": "ProRes422Proxy", "DNxHR LB": "DNxHRLB"})
         return c
 
+    presets = ["Live H264"]
+
+    def GetRenderPresetList(self): return list(self.presets)
+
     def LoadRenderPreset(self, name):
-        if name != "Live H264":
+        if name not in self.presets:
             return False
         self.fmt = {"format": "mp4", "codec": "H264"}
         return True
@@ -220,6 +224,10 @@ class Resolve:
         self.page = "edit"
 
     def GetProjectManager(self): return PM(self.project)
+
+    def ImportRenderPreset(self, path):
+        self.project.presets = self.project.presets + ["MIUGLITCH Live H264"]
+        return True
     def GetCurrentPage(self): return self.page
 
     def OpenPage(self, p):

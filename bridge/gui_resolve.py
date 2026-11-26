@@ -167,10 +167,8 @@ class ResolveTab:
         combo(vg, self.rv_res, video.RESOLUTIONS, 140).grid(row=1, column=2, sticky="w", padx=(0, 12))
         label(vg, "Resolve render preset (optional)").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         entry(vg, self.rv_preset, 210).grid(row=3, column=0, sticky="w", padx=(0, 12))
-        hint = label(vg, "Resolve's scripting can't set the key frame interval. ProRes and DNxHR are "
-                         "every-frame already. For H.264 with a key frame on every frame, save a render "
-                         "preset in Resolve with Key Frames = Every 1 frame and type its name here "
-                         "(the preset then sets the codec too).")
+        hint = label(vg, "H.264 gets a key frame on every frame (Live needs it) through the app's own Resolve "
+                         "render preset, added to Resolve automatically. Only type a preset name to use your own.")
         hint.configure(wraplength=560, justify="left")
         hint.grid(row=3, column=1, columnspan=3, sticky="w")
 

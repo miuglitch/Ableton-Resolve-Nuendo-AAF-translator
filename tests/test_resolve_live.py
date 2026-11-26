@@ -229,7 +229,7 @@ def test_builtin_template(env):
     assert abs(float(u.find("Gain/Manual").get("Value")) - 1.0) < 1e-6   # linear 0 dB in Live 12
     ids = [e.get("Id") for e in root.iter() if e.get("Id") and (e.tag.endswith("Target"))]
     assert len(ids) == len(set(ids))                                # pointee ids stay unique
-    assert not res.warnings or all("AAF" in w for w in res.warnings)
+    assert all("AAF" in w or "ProRes Proxy" in w for w in res.warnings)
 
 
 def test_resolve_renders_final_clips(env):
@@ -270,3 +270,28 @@ def test_codec_not_available():
         def GetRenderCodecs(self, f): return {"H.265": "H265"}
     with pytest.raises(resolve_api.ResolveError):
         resolve_live.resolve_format(P(), "H.264 (.mp4)")
+
+
+def test_h264_preset_imported(env, monkeypatch):
+    """With the shipped preset, Resolve renders H.264 itself (no conversion)."""
+    xml = os.path.join(env["d"], "preset.xml")
+    open(xml, "w").write("<x/>")
+    monkeypatch.setattr(resolve_live, "preset_file", lambda: xml)
+    called = []
+    monkeypatch.setattr(resolve_live, "h264_every_frame", lambda a, b: called.append(a))
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "h264preset", audio=False)
+    assert "MIUGLITCH Live H264" in rv.project.presets
+    assert called == [] and not res.warnings
+
+
+def test_h264_fallback_converts(env):
+    """No preset available: ProRes from Resolve, converted to every-frame H.264."""
+    rv, rt, res = _run(env, resolve_live.MODE_HANDLES, "h264fallback", audio=False)
+    assert any("ProRes Proxy" in w for w in res.warnings)
+    side = json.load(open(res.als_path[:-4] + ".bridge.json"))
+    f = side["shots"][0]["live_file"]
+    assert f.endswith(".mp4") and os.path.exists(f)
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "frame=key_frame",
+                          "-of", "csv=p=0", f], capture_output=True, text=True).stdout.split()
+    assert out and all(k.startswith("1") for k in out)        # every frame is a key frame
+    assert near(pixel(f, 0.5), fr.color_of("snow", dim=True))
