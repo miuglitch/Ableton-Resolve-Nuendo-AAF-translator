@@ -14,6 +14,15 @@ from .media import SAMPLE_RATES
 from .timecode import seconds_to_tc
 
 TAB = "Resolve → Live"
+def res_label(res: str, w: int = 1920, h: int = 1080) -> str:
+    """'720p' -> '720p (1280x720)' for the timeline's shape."""
+    if res == "Same as source":
+        return f"Same as source ({w}x{h})"
+    s = video.VideoSettings(resolution=res)
+    tw, th = video.target_size(s, w, h)
+    return f"{res} ({tw}x{th})"
+
+
 DEFAULT_OUT = os.path.join(os.path.expanduser("~"), "Documents", "MIUGLITCH Live Sets")
 
 
@@ -68,7 +77,7 @@ class ResolveTab:
         dest.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self.rv_tpl = tk.StringVar(value=s.get("rv_template", ""))
         self.rv_own = tk.BooleanVar(value=s.get("rv_own_template", False))
-        self.rv_open = tk.BooleanVar(value=s.get("rv_open_after", True))
+        self.rv_open = tk.BooleanVar(value=s.get("rv_open_live", False))
         self.rv_mode = tk.StringVar(value=NEW)
         ctk.CTkSegmentedButton(dest, values=[NEW, ADD], variable=self.rv_mode,
                                command=lambda v: self._rv_mode_changed(),
@@ -155,7 +164,7 @@ class ResolveTab:
         self.rv_codec = tk.StringVar(value=d.get("codec") if d.get("codec") in codecs else codecs[0])
         self.rv_rate = tk.StringVar(value=d.get("frame_rate", "Same as source"))
         res = d.get("resolution", "720p")
-        self.rv_res = tk.StringVar(value=res if res in video.RESOLUTIONS else "720p")
+        self.rv_res = tk.StringVar(value=res_label(res if res in video.RESOLUTIONS else "720p"))
         self.rv_preset = tk.StringVar(value=s.get("rv_render_preset", ""))
         vg = ctk.CTkFrame(vp, fg_color="transparent")
         vg.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 8))
@@ -164,7 +173,8 @@ class ResolveTab:
         label(vg, "Frame rate").grid(row=0, column=1, sticky="w")
         combo(vg, self.rv_rate, video.FRAME_RATES, 140).grid(row=1, column=1, sticky="w", padx=(0, 12))
         label(vg, "Resolution").grid(row=0, column=2, sticky="w")
-        combo(vg, self.rv_res, video.RESOLUTIONS, 140).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        self.rv_res_menu = combo(vg, self.rv_res, [res_label(r) for r in video.RESOLUTIONS], 190)
+        self.rv_res_menu.grid(row=1, column=2, sticky="w", padx=(0, 12))
         label(vg, "Resolve render preset (optional)").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         entry(vg, self.rv_preset, 210).grid(row=3, column=0, sticky="w", padx=(0, 12))
         hint = label(vg, "H.264 gets a key frame on every frame (Live needs it) through your 'ABLETON VIDEO' Resolve "
@@ -213,7 +223,7 @@ class ResolveTab:
         self.rv_stage = tk.BooleanVar(value=s.get("rv_gain_staging", True))
         check(ac, "Clip gain, fades and volume automation from Resolve (automation → Utility Gain)",
               self.rv_aaf).grid(row=5, column=0, columnspan=3, sticky="w", padx=14, pady=(6, 4))
-        check(ac, "Tracks at -18 dB, +18 dB Utility on the Main track (needs a Utility in the template)",
+        check(ac, "Tracks at -18 dB, +18 dB Utility on the Main track",
               self.rv_stage).grid(row=6, column=0, columnspan=3, sticky="w", padx=14, pady=(4, 12))
 
         # --- advanced ---------------------------------------------------------------
@@ -240,8 +250,13 @@ class ResolveTab:
         self.rv_bar.grid(row=0, column=1, sticky="ew", padx=(16, 0))
         self.rv_step = label(run, "")
         self.rv_step.grid(row=1, column=1, sticky="w", padx=(16, 0))
-        check(run, "Open the new set in Live when it's done", self.rv_open).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        orow = ctk.CTkFrame(run, fg_color="transparent")
+        orow.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        check(orow, "Open the new set in Live when it's done", self.rv_open).pack(side="left", padx=(0, 18))
+        self.rv_folder_btn = button(orow, "Show saved set", self._rv_show_folder, width=140)
+        self.rv_folder_btn.pack(side="left")
+        self.rv_folder_btn.configure(state="disabled")
+        self._rv_last_set = None
         self.rv_log = ctk.CTkTextbox(page, height=180, fg_color=PANEL, text_color=TEXT,
                                      border_width=1, border_color=LINE, font=ctk.CTkFont("Consolas", 12),
                                      corner_radius=8)
@@ -343,6 +358,7 @@ class ResolveTab:
             self.rv_detail.configure(text="")
             return
         self.rt = rt
+        self._rv_res_labels(rt.width, rt.height)
         shots = resolve_live.plan_shots(rt)
         self.rv_status.configure(text=f"{rt.project}  /  {rt.name}", text_color=TEXT)
         st = seconds_to_tc(rt.sec(rt.start), rt.fps, rt.drop_frame)
@@ -393,12 +409,12 @@ class ResolveTab:
         handles = self.rv_rmode.get() == HANDLES_LBL
         whole = self.rv_whole.get() != "Handles"
         vs = video.VideoSettings(codec=self.rv_codec.get(), frame_rate=self.rv_rate.get(),
-                                 resolution=self.rv_res.get())
+                                 resolution=self.rv_res.get().split(" (")[0])
         self.settings["resolve_video"] = {"codec": vs.codec, "frame_rate": vs.frame_rate,
                                           "resolution": vs.resolution}
         chosen = [n for n, v in self.rv_track_vars if v.get()] if self.rv_track_vars else None
         self.settings.update(
-            rv_template=self.rv_tpl.get(), rv_own_template=own, rv_open_after=self.rv_open.get(),
+            rv_template=self.rv_tpl.get(), rv_own_template=own, rv_open_live=self.rv_open.get(),
             tempo=tempo, sample_rate=int(self.rv_sr.get()),
             rv_video=self.rv_video.get(), rv_render_mode="handles" if handles else "full",
             rv_video_head=self._num(self.rv_vhead, 2.0), rv_video_tail=self._num(self.rv_vtail, 2.0),
@@ -440,9 +456,13 @@ class ResolveTab:
                 self.after(0, self._rv_say, f"✓ Live Set created: {res.als_path}")
                 self.after(0, self._rv_say, f"  {len(res.warnings)} warning(s), report saved next to the set.")
                 self.after(0, self._rv_project_changed)
+                self._rv_last_set = res.als_path
+                self.after(0, lambda: self.rv_folder_btn.configure(state="normal"))
                 if opt_open:
                     self.after(0, self._rv_say, "Opening it in Live…")
                     open_file(res.als_path)
+                else:
+                    self.after(0, self._rv_say, f"Saved in: {os.path.dirname(res.als_path)}")
             except resolve_api.ResolveError as e:
                 self.after(0, self._rv_say, f"✗ {e}")
             except Exception as e:
@@ -450,6 +470,22 @@ class ResolveTab:
             finally:
                 self.after(0, lambda: self.rv_go.configure(state="normal", text="Build Live Set from Resolve"))
         threading.Thread(target=work, daemon=True).start()
+
+    def _rv_show_folder(self):
+        p = self._rv_last_set
+        if not p:
+            return
+        import subprocess
+        import sys
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+        else:
+            open_file(os.path.dirname(p))
+
+    def _rv_res_labels(self, w, h):
+        cur = self.rv_res.get().split(" (")[0]
+        self.rv_res_menu.configure(values=[res_label(r, w, h) for r in video.RESOLUTIONS])
+        self.rv_res.set(res_label(cur, w, h))
 
     def _rv_prog(self, fr, text):
         self.rv_bar.set(max(0.0, min(1.0, fr)))
