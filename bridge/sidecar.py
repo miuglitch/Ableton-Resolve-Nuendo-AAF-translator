@@ -50,6 +50,11 @@ class Sidecar:
     # timeline: video tracks, and audio tracks that weren't brought into Live.
     video: list[dict] = field(default_factory=list)        # {"track": "V1", "clips": [clip dicts]}
     extra_audio: list[dict] = field(default_factory=list)  # {"track": "A5", "clips": [...]}
+    # Built straight from Resolve: which project/timeline, and every picture
+    # shot with its source file + source timecode, so a later re-conform can
+    # find what moved. {"project", "timeline", "timeline_id", "render_mode", ...}
+    resolve: dict = field(default_factory=dict)
+    shots: list[dict] = field(default_factory=list)
     version: int = VERSION
 
     # convenience accessors

@@ -176,6 +176,12 @@ class AlsBuilder:
         self.clip_proto = copy.deepcopy(clip)
         for slot in self.clip_proto.iter("ClipSlot"):      # never nest session data
             slot.getparent().remove(slot)
+        # Live's Utility device ('StereoGain'), if the template has one anywhere:
+        # used for the per-track gain/automation and the +dB on the Main track.
+        util = protos[0].find("DeviceChain/DeviceChain/Devices/StereoGain")
+        if util is None:
+            util = tpl.find(".//StereoGain")
+        self.utility_proto = copy.deepcopy(util) if util is not None else None
         loc = tpl.find("Locators/Locators/Locator")
         self.locator_proto = copy.deepcopy(loc) if loc is not None else None
 
@@ -273,12 +279,83 @@ class AlsBuilder:
         locs.append(loc)
 
     # -- tracks ----------------------------------------------------------
+    # -- Utility device ------------------------------------------------------
+    def _util_range(self, util) -> tuple[float, float, bool]:
+        """(min, max, is_db) of the Utility's Gain parameter. Older Live saves
+        it as a linear factor (1 = 0 dB), newer as dB; the range tells which."""
+        g = util.find("Gain")
+        lo = g.find("MidiControllerRange/Min") if g is not None else None
+        hi = g.find("MidiControllerRange/Max") if g is not None else None
+        try:
+            mn, mx = float(lo.get("Value")), float(hi.get("Value"))
+        except (AttributeError, TypeError, ValueError):
+            man = g.find("Manual") if g is not None else None
+            v = float(man.get("Value")) if man is not None else 0.0
+            return (-35.0, 35.0, True) if v <= 0.5 else (0.0, db_to_lin(35), False)
+        return mn, mx, mn < 0
+
+    def util_value(self, util, db: float) -> float:
+        mn, mx, is_db = self._util_range(util)
+        v = db if is_db else db_to_lin(db)
+        return max(mn, min(mx, v))
+
+    def _new_utility(self, db: float = 0.0):
+        u = copy.deepcopy(self.utility_proto)
+        g = u.find("Gain")
+        if g is not None:
+            _v(g, "Manual", self.util_value(u, db))
+        _v(u, "On/Manual", True)
+        return u
+
+    def master_utility(self, db: float) -> str:
+        """Make sure the Main track ends with a Utility at `db`. Returns
+        'present', 'added', or 'no-utility' (template has none to copy)."""
+        main = self.liveset.find("MainTrack")
+        if main is None:
+            main = self.liveset.find("MasterTrack")
+        devs = main.find("DeviceChain/DeviceChain/Devices") if main is not None else None
+        if devs is None:
+            return "no-utility"
+        for u in devs.findall("StereoGain"):
+            g = u.find("Gain/Manual")
+            try:
+                cur = float(g.get("Value"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if abs(cur - self.util_value(u, db)) < 1e-3:
+                return "present"
+        if self.utility_proto is None:
+            return "no-utility"
+        u = self._new_utility(db)
+        used = set()
+        for d in devs:
+            try:
+                used.add(int(d.get("Id")))
+            except (TypeError, ValueError):
+                pass
+        u.set("Id", str(max(used) + 1 if used else 0))
+        self.ids.renumber(u)
+        u.tail = "\n"
+        devs.append(u)
+        return "added"
+
     def add_track(self, name: str, clips: list[Clip], offset: Fraction,
-                  color: int | None = None, warnings: list | None = None) -> None:
+                  color: int | None = None, warnings: list | None = None,
+                  volume_db: float | None = None, utility: bool = False) -> None:
+        """volume_db: fader level (None = 0 dB). utility: put a Utility on the
+        track and write clip volume automation to its Gain instead of the fader."""
         t = copy.deepcopy(self.track_proto)
         new_id = (max(self.track_ids) + 1) if self.track_ids else 8
         self.track_ids.add(new_id)
         t.set("Id", str(new_id))
+        devs = t.find("DeviceChain/DeviceChain/Devices")
+        if devs is not None:
+            for d in list(devs):
+                devs.remove(d)
+            if utility and self.utility_proto is not None:
+                u = self._new_utility(0.0)
+                u.set("Id", "0")
+                devs.append(u)
         self.ids.renumber(t)
         _v(t, "Name/EffectiveName", name)
         _v(t, "Name/UserName", name)
@@ -287,13 +364,9 @@ class AlsBuilder:
             _v(t, "ColorIndex", color)
         _v(t, "TrackGroupId", -1)
         # start clean whatever the template track was set to
-        _v(t, "DeviceChain/Mixer/Volume/Manual", 1.0)
+        _v(t, "DeviceChain/Mixer/Volume/Manual", db_to_lin(volume_db) if volume_db is not None else 1.0)
         _v(t, "DeviceChain/Mixer/Pan/Manual", 0.0)
         _v(t, "DeviceChain/Mixer/Speaker/Manual", True)
-        devs = t.find("DeviceChain/DeviceChain/Devices")
-        if devs is not None:
-            for d in list(devs):
-                devs.remove(d)
 
         events = t.find(".//MainSequencer/Sample/ArrangerAutomation/Events")
         for e in list(events):
@@ -320,7 +393,13 @@ class AlsBuilder:
                 auto_points.append((live_start, c))
 
         if auto_points and envs is not None:
-            self._volume_envelope(t, envs, auto_points)
+            u = devs.find("StereoGain") if (utility and devs is not None) else None
+            if u is not None and u.find("Gain/AutomationTarget") is not None:
+                self._volume_envelope(t, envs, auto_points, u.find("Gain/AutomationTarget"),
+                                      lambda db, u=u: self.util_value(u, db),
+                                      self.util_value(u, 0.0))
+            else:
+                self._volume_envelope(t, envs, auto_points)
 
         t.tail = "\n"
         self.tracks_el.insert(self.insert_at, t)
@@ -401,10 +480,18 @@ class AlsBuilder:
         _v(ref, "DefaultDuration", frames)
         _v(ref, "DefaultSampleRate", sr)
 
-    def _volume_envelope(self, track, envs, auto_points):
-        vol_target = track.find(".//DeviceChain/Mixer/Volume/AutomationTarget")
+    def _volume_envelope(self, track, envs, auto_points, vol_target=None, conv=None, rest=None):
+        """Clip volume curves as one track envelope. Default target: the
+        track fader. conv turns dB into the parameter's value; rest is the
+        value between clips (0 dB)."""
+        if vol_target is None:
+            vol_target = track.find(".//DeviceChain/Mixer/Volume/AutomationTarget")
         if vol_target is None:
             return
+        if conv is None:
+            def conv(db):
+                return min(db_to_lin(db), MAX_TRACK_GAIN)
+            rest = 1.0
         env = etree.SubElement(envs, "AutomationEnvelope")
         env.set("Id", str(len(envs) - 1))
         tgt = etree.SubElement(env, "EnvelopeTarget")
@@ -418,21 +505,21 @@ class AlsBuilder:
             e = etree.SubElement(evs, "FloatEvent")
             e.set("Id", str(n))
             e.set("Time", time if isinstance(time, str) else _num(time))
-            e.set("Value", _num(min(val, MAX_TRACK_GAIN)))
+            e.set("Value", _num(val))
             n += 1
 
-        ev(EARLY, 1.0)
+        ev(EARLY, rest)
         tiny = 1 / 48000
         for live_start, c in sorted(auto_points, key=lambda x: x[0]):
             pts = sorted(c.volume, key=lambda p: p.time)
             s = float(live_start)
-            ev(self.beats(Fraction(s - tiny)) if s > tiny else 0, 1.0)
-            ev(self.beats(Fraction(s)), db_to_lin(pts[0].db))
+            ev(self.beats(Fraction(s - tiny)) if s > tiny else 0, rest)
+            ev(self.beats(Fraction(s)), conv(pts[0].db))
             for p in pts:
                 if 0 <= p.time <= c.duration:
-                    ev(self.beats(live_start + p.time), db_to_lin(p.db))
-            ev(self.beats(live_start + c.duration), db_to_lin(pts[-1].db))
-            ev(self.beats(live_start + c.duration) + self.beats(Fraction(tiny)), 1.0)
+                    ev(self.beats(live_start + p.time), conv(p.db))
+            ev(self.beats(live_start + c.duration), conv(pts[-1].db))
+            ev(self.beats(live_start + c.duration) + self.beats(Fraction(tiny)), rest)
         ts = etree.SubElement(auto, "AutomationTransformViewState")
         etree.SubElement(ts, "IsTransformPending").set("Value", "false")
         etree.SubElement(ts, "TimeAndValueTransforms")

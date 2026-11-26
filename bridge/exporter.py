@@ -231,6 +231,11 @@ def run(als_path: str, opt: ExportOptions, pre: Preflight | None = None) -> Expo
             if link and not link.source.startswith(EMBEDDED) and os.path.exists(link.source):
                 out.source_path = media.asset(link.source, copy=False)
                 out.channels = list(link.channels)
+                try:                                  # WAV holds only part of the source
+                    n, d = link.wav_start_in_source.split("/")
+                    out.source_in = c.source_in + Fraction(int(n), int(d))
+                except (ValueError, AttributeError):
+                    pass
                 orig.append(out)
             else:
                 out.source_path = media.asset(c.source_path, copy=True)

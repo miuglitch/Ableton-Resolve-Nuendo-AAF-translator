@@ -33,6 +33,34 @@ match your Live version exactly:
 If the template has no clip, a built-in clip definition is used instead and
 the report says so. Drop the template on the app once; it is remembered.
 
+## One click: Resolve → Live (tab "Resolve → Live")
+
+Needs **DaVinci Resolve Studio** open with the timeline, and in Resolve:
+Preferences → System → General → *External scripting using* = **Local**.
+(The free version of Resolve doesn't let outside apps connect.)
+
+1. Click **Read open timeline** to check the connection (project, timeline, shots, tracks).
+2. Pick the Live template and where to save (new project, or add to an existing one).
+3. **Build Live Set from Resolve.** Resolve renders the picture on its Deliver page;
+   your render settings, page and timeline are put back afterwards.
+
+Picture: footage clips decide the cuts. A title over a cut is split there and goes
+with the shot underneath. One Live clip per shot, on a track named like the Resolve
+video track, with a locator at each shot and the timeline's stereo mix as its sound.
+*Full timeline* renders once and cuts it up (handles = neighbouring edit).
+*Per shot, real source handles* also renders a temporary timeline where each shot is
+extended with its own footage (grade, Fusion comps and Inspector transforms copied;
+deleted afterwards). Titles appear inside the cut, handles are clean footage.
+
+Audio: one Live track per Resolve audio track (same name), clips cut with head/tail
+handles or whole files, optional normalising (as clip gain), clip gain/fades/volume
+automation read from an AAF Resolve exports in the background (automation goes to a
+Utility's Gain). Gain staging: tracks at -18 dB and +18 dB Utility on the Main track.
+**Put one Utility (at 0 dB) on the template's audio track** so the app can copy it.
+
+The .bridge.json next to the set records every shot's source file and source
+timecode, for a later re-conform.
+
 ## Import: Resolve → Live
 
 **In Resolve:** File → Export → Timeline… → **FCPXML** (recommended: carries

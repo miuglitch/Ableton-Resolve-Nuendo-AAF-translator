@@ -23,6 +23,7 @@ except Exception:          # app still works without drag and drop
 
 from . import __version__, exporter, importer, video
 from .media import SAMPLE_RATES
+from .gui_resolve import TAB as RESOLVE_TAB, ResolveTab
 from .scrolling import ScrollManager
 from .timecode import seconds_to_tc
 
@@ -184,7 +185,7 @@ class VideoPanel(Card):
 Base = (type("Base", (ctk.CTk, TkinterDnD.DnDWrapper), {}) if HAS_DND else ctk.CTk)
 
 
-class App(Base):
+class App(Base, ResolveTab):
     def __init__(self):
         global HAS_DND
         super().__init__()
@@ -217,11 +218,12 @@ class App(Base):
                               command=self._recolor_tabs)
         tabs.pack(fill="both", expand=True, padx=14, pady=(0, 14))
         self.tabs = tabs
-        for name in ("Resolve / Nuendo → Live", "Live → Resolve / Nuendo", "Picture transcode"):
+        for name in (RESOLVE_TAB, "Resolve / Nuendo → Live", "Live → Resolve / Nuendo", "Picture transcode"):
             tabs.add(name)
         self._recolor_tabs()
 
         self.scroll = ScrollManager(self)
+        self._build_resolve(tabs.tab(RESOLVE_TAB))
         self._build_import(tabs.tab("Resolve / Nuendo → Live"))
         self._build_export(tabs.tab("Live → Resolve / Nuendo"))
         self._build_video(tabs.tab("Picture transcode"))
@@ -269,6 +271,18 @@ class App(Base):
                          "timeline" if ext in TIMELINE_EXT else
                          "template" if ext == ".als" else
                          "picture" if ext in VIDEO_EXT else None)
+        if self.tabs.get() == RESOLVE_TAB and not force:
+            kind = {"template": "rtpl", "folder": "rproj" if self.rv_mode.get() == "Add to existing project"
+                    else "rout"}.get(kind, kind)
+        if kind == "rtpl":
+            return self.rv_tpl.set(path)
+        if kind == "rout":
+            return self.rv_out.set(path if os.path.isdir(path) else os.path.dirname(path))
+        if kind == "rproj":
+            if path.lower().endswith(".als"):
+                self.rv_proj.set(os.path.dirname(path))
+                return self.rv_base.set(os.path.basename(path))
+            return self.rv_proj.set(path if os.path.isdir(path) else os.path.dirname(path))
         if self.tabs.get() == "Picture transcode" and not force:
             kind = {"picture": "vin", "folder": "vout"}.get(kind, kind)
         if self.tabs.get() == "Live → Resolve / Nuendo" and not force:

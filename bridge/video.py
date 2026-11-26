@@ -207,3 +207,77 @@ def transcode(src: str, out_dir: str, s: VideoSettings, log=print) -> str:
     if r.returncode != 0:
         raise RuntimeError(f"Video transcode failed: {r.stderr.strip()[-600:]}")
     return dst
+
+
+def target_size(s: VideoSettings, frame_w: int, frame_h: int) -> tuple[int, int]:
+    """Output size for the chosen resolution, keeping the timeline's aspect."""
+    h = _height(s.resolution) or frame_h
+    h -= h % 2
+    w = int(round(h * frame_w / frame_h / 2)) * 2 if frame_h else int(round(h * 16 / 9 / 2)) * 2
+    return w, h
+
+
+def cut_parts(parts, dst: str, s: VideoSettings, rate, size: tuple[int, int]) -> str:
+    """Join pieces of rendered files into one Live-ready clip.
+
+    parts: list of (file, start seconds, duration seconds, keep_audio). Pieces
+    without audio (or keep_audio False) get silence, so the clip's sound
+    stays in sync. The result has video + a stereo audio track (Live loads
+    video files as audio clips)."""
+    ext, vargs, gop_ok = CODECS[s.codec]
+    w, h = size
+    r = f"{rate.numerator}/{rate.denominator}" if hasattr(rate, "numerator") else str(rate)
+    if s.frame_rate != "Same as source":
+        r = RATE_ARG.get(s.frame_rate, s.frame_rate)
+    cmd = [tool("ffmpeg"), "-y", "-v", "error"]
+    has_audio = {}
+    for f_, st, du, _ in parts:
+        if f_ not in has_audio:
+            try:
+                has_audio[f_] = any(x.get("codec_type") == "audio" for x in probe(f_)["streams"])
+            except Exception:
+                has_audio[f_] = False
+    filt, labels = [], []
+    n_in = 0
+    for k, (f_, st, du, keep) in enumerate(parts):
+        cmd += ["-ss", f"{max(0.0, float(st)):.6f}", "-t", f"{float(du):.6f}", "-i", f_]
+        vi = n_in
+        n_in += 1
+        if keep and has_audio[f_]:
+            ai = f"{vi}:a:0"
+            filt.append(f"[{ai}]atrim=duration={float(du):.6f},apad=whole_dur={float(du):.6f},"
+                        f"aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{k}]")
+        else:
+            cmd += ["-f", "lavfi", "-t", f"{float(du):.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
+            ai = f"{n_in}:a:0"
+            n_in += 1
+            filt.append(f"[{ai}]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{k}]")
+        filt.append(f"[{vi}:v:0]setpts=PTS-STARTPTS,fps={r},trim=duration={float(du):.6f},"
+                    f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[v{k}]")
+        labels.append(f"[v{k}][a{k}]")
+    tail = ""
+    if s.burn_timecode:
+        font = _font()
+        tail = (f",drawtext=text='%{{pts\\:hms}}':fontsize=h/30:fontcolor=white:"
+                f"box=1:boxcolor=black@0.6:boxborderw=8:x=(w-tw)/2:y=h/30")
+        if font:
+            tail += f":fontfile='{font}'"
+    filt.append(f"{''.join(labels)}concat=n={len(parts)}:v=1:a=1[vc][ac]")
+    filt.append(f"[vc]setsar=1{tail}[vout]")
+    cmd += ["-filter_complex", ";".join(filt), "-map", "[vout]", "-map", "[ac]"] + vargs
+    cmd += ["-c:a", "pcm_s16le" if ext in (".mov", ".mxf") else "aac", "-ar", "48000"]
+    if ext == ".mp4":
+        cmd += ["-b:a", "256k"]
+    if gop_ok:
+        g = max(1, int(s.keyframe_interval))
+        cmd += ["-g", str(g), "-keyint_min", str(g), "-sc_threshold", "0"]
+        if g == 1:
+            cmd += ["-bf", "0"]
+    if ext in (".mp4", ".mov"):
+        cmd += ["-movflags", "+faststart"]
+    cmd += ["-map_metadata", "-1", dst]
+    res = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+    if res.returncode != 0:
+        raise RuntimeError(f"Video cut failed: {res.stderr.strip()[-600:]}")
+    return dst

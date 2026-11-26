@@ -135,6 +135,7 @@ class MediaConverter:
         self.info_cache: dict[str, dict] = {}
         self.links: list[tuple[str, str, list[int]]] = []   # wav, source, channels
         self.warnings: list[str] = []
+        self.seg_starts: dict[str, Fraction] = {}   # wav -> start in source (seconds)
         os.makedirs(out_dir, exist_ok=True)
 
     def _info(self, path):
@@ -247,6 +248,62 @@ class MediaConverter:
         c.channels = chans
         return out
 
+    def convert_segment(self, c, head: Fraction, tail: Fraction, tag: str) -> tuple[str, Fraction]:
+        """Only the part of the source a clip uses, plus `head`/`tail` seconds
+        of handles (as far as the file allows). Returns (wav, where the wav
+        starts in the source, in seconds). Sets c.channels."""
+        from .readers.aaf import EMBEDDED
+        real = self._embedded(c.source_path) if c.source_path.startswith(EMBEDDED) else c.source_path
+        if not os.path.exists(real):
+            raise FileNotFoundError(f"Media offline: {real}")
+        info = self._info(real)
+        layout = audio_layout(info)
+        total = sum(layout)
+        if total == 0:
+            raise RuntimeError(f"No audio in {real}")
+        chans = [x for x in c.channels if 1 <= x <= total] or list(range(1, min(total, 2) + 1))
+        chans = chans[:2]
+        try:
+            media_len = Fraction(str(float(info["format"]["duration"])))
+        except (KeyError, ValueError):
+            media_len = None
+        used = c.duration * (c.speed or 1)
+        a = max(Fraction(0), c.source_in - head)
+        b = c.source_in + used + tail
+        if media_len is not None:
+            b = min(b, media_len)
+        if b <= a:
+            raise RuntimeError(f"Clip lies outside its media file ({os.path.basename(real)})")
+        base = _safe(os.path.splitext(os.path.basename(real))[0])
+        kr = f"{self.sr // 1000 if self.sr % 1000 == 0 else self.sr / 1000:g}k"
+        out = os.path.join(self.out_dir, f"{_safe(tag)}_{base}_{kr}.wav")
+        stamp = f"bridge-source:{real}|{self.sr}|{float(a):.6f}|{float(b):.6f}|{','.join(map(str, chans))}"
+        n = 2
+        while out in self.cache.values() or (os.path.exists(out) and not self._has_comment(out, stamp)):
+            out = os.path.join(self.out_dir, f"{_safe(tag)}_{base}_{kr}_{n}.wav")
+            n += 1
+        if not os.path.exists(out):
+            cmd = [tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{float(a):.6f}", "-t", f"{float(b - a):.6f}",
+                   "-i", real, "-filter_complex", _channel_filter(layout, chans), "-map", "[out]",
+                   "-ar", str(self.sr), "-c:a", "pcm_s24le", "-rf64", "auto",
+                   "-metadata", f"comment={stamp}", out]
+            self.log(f"Audio {os.path.basename(real)} → {os.path.basename(out)}")
+            r = _run(cmd)
+            if r.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed on {real}: {r.stderr.strip()[-400:]}")
+        self.cache[("seg", out)] = out
+        self.links.append((out, c.source_path, list(chans)))
+        self.seg_starts[os.path.normcase(os.path.abspath(out))] = a
+        c.channels = chans
+        return out, a
+
+    def _has_comment(self, wav, stamp):
+        try:
+            tags = probe(wav).get("format", {}).get("tags", {})
+            return next((v for k, v in tags.items() if k.lower() == "comment"), "") == stamp
+        except Exception:
+            return False
+
     def run(self, tl: Timeline, log_progress=None) -> None:
         """Convert every clip on selected audio tracks; sets clip.wav_path."""
         clips = [(t, c) for t in tl.audio_tracks if t.selected for c in t.clips]
@@ -267,3 +324,16 @@ class MediaConverter:
         for t in tl.audio_tracks:
             if t.selected and t.clips and all(len(c.channels) == 1 for c in t.clips if c.wav_path):
                 t.channels = 1
+
+
+def peak_db(path: str, start: float = 0.0, duration: float | None = None) -> float | None:
+    """Loudest sample (dBFS) in part of a file; None if it can't be measured."""
+    cmd = [tool("ffmpeg"), "-v", "info", "-nostats", "-ss", f"{max(0.0, start):.6f}"]
+    if duration:
+        cmd += ["-t", f"{duration:.6f}"]
+    cmd += ["-i", path, "-vn", "-af", "volumedetect", "-f", "null", "-"]
+    r = _run(cmd)
+    m = re.search(r"max_volume:\s*(-?[\d.]+|-inf) dB", r.stderr or "")
+    if not m or m.group(1) == "-inf":
+        return None
+    return float(m.group(1))
