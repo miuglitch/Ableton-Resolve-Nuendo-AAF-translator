@@ -9,7 +9,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from . import importer, resolve_api, resolve_live, template
+from . import importer, resolve_api, resolve_live, template, video
 from .media import SAMPLE_RATES
 from .timecode import seconds_to_tc
 
@@ -31,15 +31,15 @@ def open_file(path):
     except Exception:
         pass
 NEW, ADD = "New Live project", "Add to existing project"
-FULL_LBL = "Full timeline, cut at each shot"
-HANDLES_LBL = "Per shot, with real source handles"
+FULL_LBL = "Handles from the edit (fastest)"
+HANDLES_LBL = "Real source handles"
 
 
 class ResolveTab:
     """Mixed into App (gui.py); uses its helpers and palette."""
 
     def _build_resolve(self, tab):
-        from .gui import (ACCENT, BG, DIM, FIELD, LINE, PANEL, TEXT, Card, NEW_TRACKS_ONLY, VideoPanel,
+        from .gui import (ACCENT, BG, DIM, FIELD, LINE, PANEL, TEXT, Card, NEW_TRACKS_ONLY,
                           button, check, combo, entry, f, label)
         self._rv_new_tracks_only = NEW_TRACKS_ONLY
         s = self.settings
@@ -141,17 +141,38 @@ class ResolveTab:
         self.rv_shotmarks = tk.BooleanVar(value=s.get("rv_shot_markers", True))
         self.rv_rmarks = tk.BooleanVar(value=s.get("rv_resolve_markers", True))
         self.rv_mix = tk.BooleanVar(value=s.get("rv_mix_track", False))
-        self.rv_keep = tk.BooleanVar(value=s.get("rv_keep_renders", False))
         check(crow, "Locator at each shot", self.rv_shotmarks).pack(side="left", padx=(0, 18))
         check(crow, "Resolve markers → locators", self.rv_rmarks).pack(side="left", padx=(0, 18))
         crow2 = ctk.CTkFrame(pc, fg_color="transparent")
         crow2.grid(row=6, column=0, columnspan=3, sticky="w", padx=14, pady=(4, 8))
         check(crow2, "Also one continuous stereo mix track", self.rv_mix).pack(side="left", padx=(0, 18))
-        check(crow2, "Keep Resolve's full-size renders", self.rv_keep).pack(side="left")
         label(pc, "Each video clip plays the timeline's stereo mix as its sound.").grid(
             row=7, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 6))
-        self.rv_panel = VideoPanel(pc, "Video format for Live", s, "resolve_video")
-        self.rv_panel.grid(row=8, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
+        vp = Card(pc, "Video format for Live (Resolve renders it directly)")
+        vp.grid(row=8, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 14))
+        d = s.get("resolve_video", {})
+        codecs = list(resolve_live.RESOLVE_CODECS)
+        self.rv_codec = tk.StringVar(value=d.get("codec") if d.get("codec") in codecs else codecs[0])
+        self.rv_rate = tk.StringVar(value=d.get("frame_rate", "Same as source"))
+        res = d.get("resolution", "720p")
+        self.rv_res = tk.StringVar(value=res if res in video.RESOLUTIONS else "720p")
+        self.rv_preset = tk.StringVar(value=s.get("rv_render_preset", ""))
+        vg = ctk.CTkFrame(vp, fg_color="transparent")
+        vg.grid(row=1, column=0, columnspan=4, sticky="ew", padx=14, pady=(0, 8))
+        label(vg, "Codec").grid(row=0, column=0, sticky="w")
+        combo(vg, self.rv_codec, codecs, 210).grid(row=1, column=0, sticky="w", padx=(0, 12))
+        label(vg, "Frame rate").grid(row=0, column=1, sticky="w")
+        combo(vg, self.rv_rate, video.FRAME_RATES, 140).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        label(vg, "Resolution").grid(row=0, column=2, sticky="w")
+        combo(vg, self.rv_res, video.RESOLUTIONS, 140).grid(row=1, column=2, sticky="w", padx=(0, 12))
+        label(vg, "Resolve render preset (optional)").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        entry(vg, self.rv_preset, 210).grid(row=3, column=0, sticky="w", padx=(0, 12))
+        hint = label(vg, "Resolve's scripting can't set the key frame interval. ProRes and DNxHR are "
+                         "every-frame already. For H.264 with a key frame on every frame, save a render "
+                         "preset in Resolve with Key Frames = Every 1 frame and type its name here "
+                         "(the preset then sets the codec too).")
+        hint.configure(wraplength=560, justify="left")
+        hint.grid(row=3, column=1, columnspan=3, sticky="w")
 
         # --- audio ---------------------------------------------------------------
         ac = Card(page, "Audio")
@@ -235,12 +256,12 @@ class ResolveTab:
 
     def _rv_hint(self):
         if self.rv_rmode.get() == HANDLES_LBL:
-            t = ("Handles are the shot's own footage, graded. Resolve renders the timeline plus a temporary "
-                 "timeline with every shot extended (deleted afterwards; your edit is never changed). "
-                 "Titles show inside the cut; handles are clean footage. Retimed shots, stills and other "
-                 "frame rates use the edit for their handles.")
+            t = ("Handles are the shot's own footage, graded. Resolve renders head, shot and tail as separate "
+                 "clips (the head and tail from a temporary timeline that's deleted afterwards; your edit is "
+                 "never changed), joined without re-encoding. Titles show inside the cut; handles are clean "
+                 "footage. Retimed shots, stills and other frame rates use the edit for their handles.")
         else:
-            t = "Fastest: Resolve renders the whole timeline once. Handles show what's next to the shot in the edit."
+            t = "Fastest: Resolve renders one clip per shot straight from your edit. Handles show what's next to the shot."
         self.rv_mode_hint.configure(text=t)
 
     def _rv_own_state(self):
@@ -373,7 +394,10 @@ class ResolveTab:
             return self._rv_say("! Tempo must be a number.")
         handles = self.rv_rmode.get() == HANDLES_LBL
         whole = self.rv_whole.get() != "Handles"
-        vs = self.rv_panel.get()
+        vs = video.VideoSettings(codec=self.rv_codec.get(), frame_rate=self.rv_rate.get(),
+                                 resolution=self.rv_res.get())
+        self.settings["resolve_video"] = {"codec": vs.codec, "frame_rate": vs.frame_rate,
+                                          "resolution": vs.resolution}
         chosen = [n for n, v in self.rv_track_vars if v.get()] if self.rv_track_vars else None
         self.settings.update(
             rv_template=self.rv_tpl.get(), rv_own_template=own, rv_open_after=self.rv_open.get(),
@@ -381,7 +405,8 @@ class ResolveTab:
             rv_video=self.rv_video.get(), rv_render_mode="handles" if handles else "full",
             rv_video_head=self._num(self.rv_vhead, 2.0), rv_video_tail=self._num(self.rv_vtail, 2.0),
             rv_shot_markers=self.rv_shotmarks.get(), rv_resolve_markers=self.rv_rmarks.get(),
-            rv_mix_track=self.rv_mix.get(), rv_keep_renders=self.rv_keep.get(), rv_audio=self.rv_audio.get(),
+            rv_mix_track=self.rv_mix.get(), rv_render_preset=self.rv_preset.get().strip(),
+            rv_audio=self.rv_audio.get(),
             rv_audio_whole=whole, rv_audio_head=self._num(self.rv_ahead, 2.0),
             rv_audio_tail=self._num(self.rv_atail, 2.0), rv_normalize=self.rv_norm.get(),
             rv_normalize_db=self._num(self.rv_norm_db, -1.0), rv_read_aaf=self.rv_aaf.get(),
@@ -398,7 +423,7 @@ class ResolveTab:
             video=sv["rv_video"], render_mode=resolve_live.MODE_HANDLES if handles else resolve_live.MODE_FULL,
             video_head=sv["rv_video_head"], video_tail=sv["rv_video_tail"], video_settings=vs,
             shot_markers=sv["rv_shot_markers"], resolve_markers=sv["rv_resolve_markers"],
-            mix_track=sv["rv_mix_track"], keep_renders=sv["rv_keep_renders"],
+            mix_track=sv["rv_mix_track"], render_preset=sv["rv_render_preset"],
             audio=sv["rv_audio"], audio_tracks=chosen, audio_whole_files=whole,
             audio_head=sv["rv_audio_head"], audio_tail=sv["rv_audio_tail"], normalize=sv["rv_normalize"],
             normalize_db=sv["rv_normalize_db"], read_aaf=sv["rv_read_aaf"], gain_staging=sv["rv_gain_staging"],

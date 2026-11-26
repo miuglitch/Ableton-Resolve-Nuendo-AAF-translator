@@ -147,7 +147,22 @@ class Project:
 
     def GetSetting(self, k): return {"timelineFrameRate": "25"}.get(k, "")
     def GetMediaPool(self): return MediaPool(self)
-    def GetRenderCodecs(self, fmt): return {"Apple ProRes 422 HQ": "ProRes422HQ", "Apple ProRes 422 LT": "ProRes422LT", "H.264": "H264"}
+    def GetRenderFormats(self): return {"QuickTime": "mov", "MP4": "mp4", "MXF OP1A": "mxf_op1a", "Wave": "wav"}
+
+    def GetRenderCodecs(self, fmt):
+        if fmt == "wav":
+            return {"Linear PCM": "LinearPCM"}
+        c = {"H.264": "H264", "H.265": "H265"}
+        if fmt == "mov":
+            c.update({"Apple ProRes 422 HQ": "ProRes422HQ", "Apple ProRes 422 LT": "ProRes422LT",
+                      "Apple ProRes 422 Proxy": "ProRes422Proxy", "DNxHR LB": "DNxHRLB"})
+        return c
+
+    def LoadRenderPreset(self, name):
+        if name != "Live H264":
+            return False
+        self.fmt = {"format": "mp4", "codec": "H264"}
+        return True
     def GetCurrentRenderFormatAndCodec(self): return dict(self.fmt)
 
     def SetCurrentRenderFormatAndCodec(self, f, c):
@@ -166,7 +181,8 @@ class Project:
 
     def AddRenderJob(self):
         jid = f"job{len(self.jobs) + 1}"
-        self.jobs[jid] = {"settings": dict(self.settings), "timeline": self.current, "done": False}
+        self.jobs[jid] = {"settings": dict(self.settings), "timeline": self.current, "done": False,
+                          "fmt": dict(self.fmt)}
         return jid
 
     def DeleteRenderJob(self, j):
@@ -185,7 +201,8 @@ class Project:
 
     def GetRenderJobList(self):
         return [{"JobId": j, "TargetDir": d["settings"]["TargetDir"],
-                 "OutputFilename": d["settings"]["CustomName"] + ".mov"} for j, d in self.jobs.items()]
+                 "OutputFilename": d["settings"]["CustomName"] + "." + d["fmt"]["format"]}
+                for j, d in self.jobs.items()]
 
 
 class PM:
@@ -211,10 +228,18 @@ class Resolve:
 
 
 def _render(job):
-    """Paint each frame range by the top-most footage clip's colour."""
-    s, tl = job["settings"], job["timeline"]
+    """Paint each frame range by the top-most footage clip's colour.
+    Handles-timeline jobs have silent audio (that timeline has no audio)."""
+    s, tl, fmt = job["settings"], job["timeline"], job["fmt"]
     a, b = s["MarkIn"], s["MarkOut"] + 1
-    w, h = s["FormatWidth"], s["FormatHeight"]
+    out = os.path.join(s["TargetDir"], s["CustomName"] + "." + fmt["format"])
+    os.makedirs(s["TargetDir"], exist_ok=True)
+    dur = (b - a) / 25
+    if not s.get("ExportVideo", True):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"sine=f=440:d={dur}:sample_rate=48000",
+                        "-ac", "2", "-c:a", "pcm_s24le", out], check=True)
+        return
+    w, h = s.get("FormatWidth", 1920), s.get("FormatHeight", 1080)
     items = [(ti, it) for ti, (_, its) in enumerate(tl.tracks["video"]) for it in its]
     cuts = sorted({a, b} | {x for _, it in items for x in (it.start, it.end) if a < x < b})
     segs = []
@@ -230,12 +255,10 @@ def _render(job):
     for n, col in segs:
         args += ["-f", "lavfi", "-i", f"color=c=0x{col[0]:02x}{col[1]:02x}{col[2]:02x}:s={w}x{h}:r=25:d={n / 25}"]
     k = len(segs)
-    args += ["-f", "lavfi", "-i", f"sine=f=440:d={(b - a) / 25}:sample_rate=48000"]
+    src = "anullsrc=r=48000:cl=stereo" if tl.handles else "sine=f=440:sample_rate=48000"
+    args += ["-f", "lavfi", "-t", str(dur), "-i", src]
     fc = "".join(f"[{i}:v]" for i in range(k)) + f"concat=n={k}:v=1:a=0[v]"
-    out = os.path.join(s["TargetDir"], s["CustomName"] + ".mov")
-    os.makedirs(s["TargetDir"], exist_ok=True)
-    from bridge.timecode import frames_to_tc
-    from fractions import Fraction
-    args += ["-filter_complex", fc, "-map", "[v]", "-map", f"{k}:a", "-c:v", "mjpeg", "-q:v", "2",
-             "-c:a", "pcm_s16le", "-ac", "2", "-timecode", frames_to_tc(a, Fraction(25)), out]
+    vcodec = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "1"] if fmt["codec"] == "H264" else ["-c:v", "mjpeg", "-q:v", "2"]
+    acodec = ["-c:a", "aac"] if fmt["format"] == "mp4" else ["-c:a", "pcm_s16le"]
+    args += ["-filter_complex", fc, "-map", "[v]", "-map", f"{k}:a", *vcodec, *acodec, "-ac", "2", "-t", str(dur), out]
     subprocess.run(args, check=True)

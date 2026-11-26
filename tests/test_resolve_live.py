@@ -111,9 +111,9 @@ def _run(env, mode, sub, tpl=None, **kw):
     d = os.path.join(env["d"], sub)
     rv = fr.Resolve(make_timeline(os.path.join(d, "media")))
     rt = resolve_api.read(rv)
+    kw.setdefault("video_settings", VideoSettings(codec="H.264 (.mp4)", resolution="360p"))
     opt = resolve_live.Options(template=tpl or env["tpl"], out_dir=d, render_mode=mode, video_head=1.0,
                                video_tail=1.0, audio_head=0.5, audio_tail=0.5,
-                               video_settings=VideoSettings(codec="H.264 (.mp4)", resolution="360p"),
                                log=lambda m: None, **kw)
     res = resolve_live.run(rv, rt, opt)
     return rv, rt, res
@@ -230,3 +230,43 @@ def test_builtin_template(env):
     ids = [e.get("Id") for e in root.iter() if e.get("Id") and (e.tag.endswith("Target"))]
     assert len(ids) == len(set(ids))                                # pointee ids stay unique
     assert not res.warnings or all("AAF" in w for w in res.warnings)
+
+
+def test_resolve_renders_final_clips(env):
+    """No intermediate: one Resolve job per shot, straight into the Live format."""
+    seen = []
+    orig = fr._render
+
+    def spy(job):
+        seen.append((job["fmt"]["format"], job["fmt"]["codec"], job["settings"]["MarkIn"],
+                     job["settings"]["MarkOut"], job["settings"].get("FormatHeight")))
+        orig(job)
+    fr._render = spy
+    try:
+        rv, rt, res = _run(env, resolve_live.MODE_FULL, "direct", audio=False, mix_track=True,
+                           video_settings=VideoSettings(codec="ProRes 422 Proxy (.mov)", resolution="540p"))
+    finally:
+        fr._render = orig
+    video_jobs = [j for j in seen if j[0] == "mov"]
+    assert video_jobs == [("mov", "ProRes422Proxy", 90000, 90124, 540), ("mov", "ProRes422Proxy", 90075, 90249, 540)]
+    assert any(j[0] == "wav" for j in seen)                         # stereo mix track
+    side = json.load(open(res.als_path[:-4] + ".bridge.json"))
+    assert all(s["live_file"].endswith(".mov") and "_parts" not in s["live_file"] for s in side["shots"])
+    root = load(res.als_path)
+    assert "STEREO MIX" in [t.find("Name/EffectiveName").get("Value") for t in root.iter("AudioTrack")]
+
+
+def test_render_preset(env):
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "preset", audio=False, render_preset="Live H264")
+    side = json.load(open(res.als_path[:-4] + ".bridge.json"))
+    assert all(s["live_file"].endswith(".mp4") for s in side["shots"])
+    with pytest.raises(resolve_api.ResolveError):
+        _run(env, resolve_live.MODE_FULL, "preset2", audio=False, render_preset="Nope")
+
+
+def test_codec_not_available():
+    class P:
+        def GetRenderFormats(self): return {"MP4": "mp4"}
+        def GetRenderCodecs(self, f): return {"H.265": "H265"}
+    with pytest.raises(resolve_api.ResolveError):
+        resolve_live.resolve_format(P(), "H.264 (.mp4)")

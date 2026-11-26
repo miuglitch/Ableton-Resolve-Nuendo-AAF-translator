@@ -43,7 +43,7 @@ from .als.writer import AlsBuilder, LIVE_COLORS, VIDEO_COLORS
 from .importer import _safe, _unique, project_sidecar, target_paths, ImportOptions
 from .media import MediaConverter, peak_db, probe, source_timecode
 from .model import Clip, Marker, Timeline, Track
-from .resolve_api import ResolveError, ResolveTimeline, RItem, pick_codec
+from .resolve_api import ResolveError, ResolveTimeline, RItem
 from .timecode import seconds_to_tc, tc_to_seconds
 
 MODE_FULL = "full"
@@ -75,7 +75,7 @@ class Options:
     shot_markers: bool = True
     resolve_markers: bool = True
     mix_track: bool = False                # also one continuous stereo-mix track
-    keep_renders: bool = False
+    render_preset: str = ""                # optional Resolve render preset (e.g. for H.264 key frames)
     # audio
     audio: bool = True
     audio_tracks: list[str] | None = None  # Resolve audio track names; None = all
@@ -157,30 +157,26 @@ def shot_tc(rt: ResolveTimeline, s: Shot) -> str:
 # --- Resolve rendering ---------------------------------------------------------
 class Renderer:
     """Adds our own jobs to Resolve's render queue, renders only those, and
-    puts the user's render format, mode, page and timeline back afterwards."""
+    puts the user's render format, mode, page and timeline back afterwards.
+    Every job is rendered by Resolve straight into the format Live gets."""
 
-    def __init__(self, resolve, rt: ResolveTimeline, out_dir: str, log, progress=None):
-        self.resolve, self.rt, self.out_dir, self.log, self.progress = resolve, rt, out_dir, log, progress
+    def __init__(self, resolve, rt: ResolveTimeline, fmt: str, codec: str, log, progress=None,
+                 preset: str = "", frame_rate: str | None = None):
+        self.resolve, self.rt, self.log, self.progress = resolve, rt, log, progress
         self.project = rt.project_obj
+        self.fmt, self.codec, self.preset, self.frame_rate = fmt, codec, preset, frame_rate
         self.jobs: list[str] = []
-        os.makedirs(out_dir, exist_ok=True)
-        self._page = None
-        self._fmt = None
-        self._mode = None
+        self.names: dict[str, tuple[str, str]] = {}      # job -> (dir, name)
+        self._page = self._fmt = self._mode = None
 
     def __enter__(self):
-        try:
-            self._page = self.resolve.GetCurrentPage()
-        except Exception:
-            self._page = None
-        try:
-            self._fmt = self.project.GetCurrentRenderFormatAndCodec()
-        except Exception:
-            self._fmt = None
-        try:
-            self._mode = self.project.GetCurrentRenderMode()
-        except Exception:
-            self._mode = None
+        for attr, call in (("_page", lambda: self.resolve.GetCurrentPage()),
+                           ("_fmt", lambda: self.project.GetCurrentRenderFormatAndCodec()),
+                           ("_mode", lambda: self.project.GetCurrentRenderMode())):
+            try:
+                setattr(self, attr, call())
+            except Exception:
+                setattr(self, attr, None)
         try:
             self.resolve.OpenPage("deliver")
         except Exception:
@@ -189,11 +185,6 @@ class Renderer:
             self.project.SetCurrentRenderMode(1)            # single clip
         except Exception:
             pass
-        fmt, codec = pick_codec(self.project)
-        if not self.project.SetCurrentRenderFormatAndCodec(fmt, codec):
-            self.log(f"! Resolve refused render format {fmt}/{codec}; using its current one.")
-        else:
-            self.log(f"Resolve renders as {fmt} / {codec}")
         return self
 
     def __exit__(self, *exc):
@@ -223,28 +214,49 @@ class Renderer:
                 pass
         return False
 
-    def queue(self, timeline, name: str, first: int, last_excl: int, size, audio=True) -> str:
+    def queue(self, timeline, out_dir: str, name: str, first: int, last_excl: int, size=None,
+              audio=True, video=True, fmt: tuple[str, str] | None = None) -> str:
+        """One render job: frames first..last_excl-1 of `timeline`."""
         if not self.project.SetCurrentTimeline(timeline):
             raise ResolveError("Resolve wouldn't switch to the timeline to render it.")
-        for old in glob.glob(os.path.join(glob.escape(self.out_dir), glob.escape(name) + ".*")):
+        os.makedirs(out_dir, exist_ok=True)
+        for old in glob.glob(os.path.join(glob.escape(out_dir), glob.escape(name) + ".*")):
             try:
                 os.remove(old)
             except OSError:
                 pass
+        if self.preset and fmt is None:
+            try:
+                if not self.project.LoadRenderPreset(self.preset):
+                    raise ResolveError(f"Resolve has no render preset called '{self.preset}'.")
+            except ResolveError:
+                raise
+            except Exception:
+                pass
+        else:
+            f_, c_ = fmt or (self.fmt, self.codec)
+            if not self.project.SetCurrentRenderFormatAndCodec(f_, c_):
+                raise ResolveError(f"Resolve refused render format {f_} / {c_}.")
         settings = {"SelectAllFrames": False, "MarkIn": int(first), "MarkOut": int(last_excl) - 1,
-                    "TargetDir": self.out_dir, "CustomName": name,
-                    "ExportVideo": True, "ExportAudio": bool(audio),
-                    "FormatWidth": int(size[0]), "FormatHeight": int(size[1])}
+                    "TargetDir": out_dir, "CustomName": name,
+                    "ExportVideo": bool(video), "ExportAudio": bool(audio)}
+        if video and size:
+            settings.update(FormatWidth=int(size[0]), FormatHeight=int(size[1]))
+        if video and self.frame_rate:
+            settings["FrameRate"] = self.frame_rate
         if not self.project.SetRenderSettings(settings):
             raise ResolveError("Resolve didn't accept the render settings.")
         job = self.project.AddRenderJob()
         if not job:
             raise ResolveError("Resolve couldn't add the render job (is the Deliver page busy?).")
         self.jobs.append(job)
+        self.names[job] = (out_dir, name)
         return job
 
     def render(self, jobs: list[str]) -> dict[str, str]:
         """Render and wait. Returns {job id: rendered file}."""
+        if not jobs:
+            return {}
         if not self.project.StartRendering(jobs, False):
             if not self.project.StartRendering(*jobs):
                 raise ResolveError("Resolve didn't start rendering.")
@@ -264,19 +276,21 @@ class Renderer:
                     pct.append(0.0)
                     ended.append(False)
             if self.progress:
-                self.progress(sum(pct) / max(1, len(pct)) / 100.0, "Resolve is rendering")
+                done = sum(1 for e in ended if e)
+                self.progress(sum(pct) / max(1, len(pct)) / 100.0,
+                              f"Resolve is rendering ({done}/{len(jobs)} clips)")
             idle = 0 if busy else idle + 1
             if (not busy and all(ended)) or idle >= 5:
                 break
             if time.time() - t0 > 6 * 3600:
                 raise ResolveError("Rendering took more than 6 hours; stopped waiting.")
-        out = {}
         listing = {}
         try:
             for d in self.project.GetRenderJobList() or []:
                 listing[d.get("JobId")] = d
         except Exception:
             pass
+        out = {}
         for j in jobs:
             st = {}
             try:
@@ -288,18 +302,79 @@ class Renderer:
                 raise ResolveError(f"Resolve render {status.lower()}"
                                    + (f": {st.get('Error')}" if st.get("Error") else "."))
             d = listing.get(j, {})
-            path = os.path.join(d.get("TargetDir", self.out_dir), d.get("OutputFilename", "")) \
+            folder, name = self.names[j]
+            path = os.path.join(d.get("TargetDir", folder), d.get("OutputFilename", "")) \
                 if d.get("OutputFilename") else ""
             if not path or not os.path.exists(path):
-                name = d.get("RenderJobName") or ""
-                hits = [p for p in glob.glob(os.path.join(glob.escape(self.out_dir), "*"))
-                        if os.path.isfile(p) and (not name or name in os.path.basename(p))]
-                hits = sorted(hits, key=os.path.getmtime, reverse=True)
+                hits = sorted(glob.glob(os.path.join(glob.escape(folder), glob.escape(name) + "*")),
+                              key=os.path.getmtime, reverse=True)
                 path = hits[0] if hits else ""
             if not path or not os.path.exists(path):
-                raise ResolveError("Resolve says it rendered, but the file wasn't found in " + self.out_dir)
+                raise ResolveError(f"Resolve says it rendered '{name}', but the file wasn't found in {folder}")
             out[j] = path
         return out
+
+
+# The video formats offered in the app, as Resolve names them:
+# app label -> (file extension, words to find the codec in Resolve's list)
+RESOLVE_CODECS = {
+    "H.264 (.mp4)": ("mp4", ["H.264", "H264"]),
+    "H.264 (.mov)": ("mov", ["H.264", "H264"]),
+    "ProRes 422 Proxy (.mov)": ("mov", ["ProRes 422 Proxy"]),
+    "ProRes 422 LT (.mov)": ("mov", ["ProRes 422 LT"]),
+    "DNxHR LB (.mov)": ("mov", ["DNxHR LB"]),
+    "DNxHR LB (.mxf)": ("mxf", ["DNxHR LB"]),
+}
+
+
+def resolve_format(project, label: str) -> tuple[str, str]:
+    """(format, codec) names Resolve uses for one of the app's video formats."""
+    ext, words = RESOLVE_CODECS.get(label, RESOLVE_CODECS["H.264 (.mp4)"])
+    formats = {}
+    try:
+        formats = project.GetRenderFormats() or {}
+    except Exception:
+        pass
+    fmt = next((f for f in formats.values() if str(f).lower() == ext), None) or \
+        next((f for f in formats.values() if str(f).lower().startswith(ext)), None) or ext
+    try:
+        codecs = project.GetRenderCodecs(fmt) or {}
+    except Exception:
+        codecs = {}
+    bad = ("265", "hevc", "hq", "444")
+    for w in words:
+        for desc, name in codecs.items():
+            d = str(desc).lower()
+            if d.strip() == w.lower() or (w.lower() in d and not any(b in d.replace(w.lower(), "") for b in bad)):
+                return fmt, name
+    if codecs:
+        raise ResolveError(f"Resolve can't render {label} on this computer. It offers: "
+                           + ", ".join(map(str, codecs)) + ". Pick another video format.")
+    return fmt, words[-1].replace(".", "")
+
+
+def audio_format(project) -> tuple[str, str]:
+    """Resolve's audio-only WAV format, for the stereo mix track."""
+    formats = project.GetRenderFormats() or {}
+    fmt = next((f for f in formats.values() if str(f).lower() == "wav"), "wav")
+    codecs = project.GetRenderCodecs(fmt) or {}
+    return fmt, (next(iter(codecs.values())) if codecs else "LinearPCM")
+
+
+def join_copy(parts: list[str], dst: str) -> str:
+    """Join Resolve's head / body / tail renders into one file without
+    re-encoding (same format, each piece starts on a key frame)."""
+    from .media import tool, _run
+    lst = dst + ".parts.txt"
+    with open(lst, "w", encoding="utf-8") as fh:
+        for p in parts:
+            fh.write("file '" + os.path.abspath(p).replace("\\", "/").replace("'", "'\\''") + "'\n")
+    r = _run([tool("ffmpeg"), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
+              "-map", "0", "-c", "copy", "-movflags", "+faststart", dst])
+    os.remove(lst)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[-300:])
+    return dst
 
 
 def build_handles_timeline(resolve, rt: ResolveTimeline, shots: list[Shot], head: int, tail: int, log):
@@ -530,34 +605,61 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
 
     # ---------------- picture ----------------
     if opt.video and shots:
-        from .video import VideoSettings, CODECS, target_size, cut_parts
+        from .video import VideoSettings, target_size
         vs = opt.video_settings or VideoSettings()
         size = target_size(vs, rt.width, rt.height)
+        fmt, codec = resolve_format(rt.project_obj, vs.codec)
+        rate = None if vs.frame_rate == "Same as source" else vs.frame_rate
         vdir = os.path.join(project_dir, "Samples", "Video")
-        rdir = os.path.join(project_dir, "Samples", "Video", "_resolve renders")
-        os.makedirs(vdir, exist_ok=True)
+        pdir = os.path.join(vdir, "_parts")
         head = int(round(Fraction(str(max(0.0, opt.video_head))) * fps))
         tail = int(round(Fraction(str(max(0.0, opt.video_tail))) * fps))
-        log(f"{len(shots)} shots · picture {size[0]}x{size[1]} · handles {opt.video_head:g}s / {opt.video_tail:g}s"
-            f" · {'real source handles' if opt.render_mode == MODE_HANDLES else 'full timeline, cut up'}")
+        log(f"{len(shots)} shots · Resolve renders {vs.codec} {size[0]}x{size[1]}"
+            + (f" via preset '{opt.render_preset}'" if opt.render_preset else "")
+            + f" · handles {opt.video_head:g}s / {opt.video_tail:g}s · "
+            + ("real source handles" if opt.render_mode == MODE_HANDLES else "handles from the edit"))
         tag = _safe(rt.name)[:40]
-        with Renderer(resolve, rt, rdir, log, lambda f, t="": say(0.05 + 0.45 * f, t)) as R:
-            jobs = {"full": R.queue(rt.obj, f"{tag}_full", rt.start, rt.end, size, audio=True)}
-            htl, placed, h_mark = None, {}, 0
+        sec = lambda fr: Fraction(fr) / fps          # noqa: E731
+        plan = {}                                    # shot index -> dict
+        with Renderer(resolve, rt, fmt, codec, log, lambda f, t="": say(0.05 + 0.6 * f, t),
+                      preset=opt.render_preset, frame_rate=rate) as R:
+            htl, placed = None, {}
             if opt.render_mode == MODE_HANDLES:
                 try:
                     log("Building the temporary handles timeline in Resolve…")
                     htl, placed = build_handles_timeline(resolve, rt, shots, head, tail, log)
-                    h_mark = int(htl.GetStartFrame())
-                    if placed:
-                        jobs["handles"] = R.queue(htl, f"{tag}_handles", h_mark,
-                                                  int(htl.GetEndFrame()), size, audio=False)
                 except ResolveError as e:
                     warnings.append(f"Real handles not possible ({e}); handles come from the edit.")
                     placed = {}
-            log("Resolve is rendering…")
             try:
-                files = R.render(list(jobs.values()))
+                for s in shots:
+                    track_name = rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}")
+                    nm = f"{_safe(track_name)}_{s.index:03d}_{_safe(s.name)[:50]}"
+                    p = {"track": track_name, "name": nm}
+                    if s.index in placed:
+                        body, pre, post = placed[s.index]
+                        L = s.end - s.start
+                        p.update(kind="source", pre=pre, post=post, jobs=[])
+                        if pre:
+                            p["jobs"].append(R.queue(htl, pdir, nm + "_head", body - pre, body, size))
+                        p["jobs"].append(R.queue(rt.obj, pdir, nm + "_body", s.start, s.end, size))
+                        if post:
+                            p["jobs"].append(R.queue(htl, pdir, nm + "_tail", body + L, body + L + post, size))
+                    else:
+                        a, e = max(rt.start, s.start - head), min(rt.end, s.end + tail)
+                        p.update(kind="edit", pre=s.start - a, post=e - s.end,
+                                 jobs=[R.queue(rt.obj, vdir, nm, a, e, size)])
+                    plan[s.index] = p
+                mix_job = None
+                if opt.mix_track:
+                    try:
+                        mix_job = R.queue(rt.obj, os.path.join(project_dir, "Samples", "Imported"),
+                                          f"{tag}_stereo mix", rt.start, rt.end, video=False,
+                                          fmt=audio_format(rt.project_obj))
+                    except Exception as e:
+                        warnings.append(f"Stereo mix track not made: {e}")
+                log(f"Resolve is rendering {len(R.jobs)} clip{'s' if len(R.jobs) != 1 else ''}…")
+                files = R.render(list(R.jobs))
             finally:
                 if htl is not None:
                     try:
@@ -565,51 +667,38 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                         rt.project_obj.GetMediaPool().DeleteTimelines([htl])
                     except Exception:
                         pass
-        full = files[jobs["full"]]
-        full0 = render_start_frame(full, fps, rt.start)
-        hfile = files.get(jobs.get("handles"))
-        h0 = render_start_frame(hfile, fps, h_mark) if hfile else 0
-        render_end = rt.end
 
         per_track: dict[int, list[Clip]] = {}
-        ext = CODECS[vs.codec][0]
         for n, s in enumerate(shots):
-            say(0.5 + 0.3 * n / len(shots), "Cutting shots")
-            sec = lambda fr: Fraction(fr) / fps          # noqa: E731
-            if s.index in placed and hfile:
-                body, pre, post = placed[s.index]
-                parts = []
-                if pre:
-                    parts.append((hfile, sec(body - pre - h0), sec(pre), False))
-                parts.append((full, sec(s.start - full0), sec(s.end - s.start), True))
-                if post:
-                    parts.append((hfile, sec(body + (s.end - s.start) - h0), sec(post), False))
-                kind = "source"
+            p = plan[s.index]
+            say(0.65 + 0.15 * n / len(shots), "Collecting clips")
+            parts = [files[j] for j in p["jobs"]]
+            if len(parts) == 1 and p["kind"] == "edit":
+                dst = parts[0]
             else:
-                a = max(rt.start, s.start - head)
-                e = min(render_end, s.end + tail)
-                pre, post = s.start - a, e - s.end
-                parts = [(full, sec(a - full0), sec(e - a), True)]
-                kind = "edit"
-            track_name = rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}")
-            dst = os.path.join(vdir, f"{_safe(track_name)}_{s.index:03d}_{_safe(s.name)[:50]}{ext}")
-            try:
-                cut_parts(parts, dst, vs, fps, size)
-            except Exception as e:
-                warnings.append(f"Shot {s.index} {s.name}: {e}")
-                continue
+                ext = os.path.splitext(parts[-1])[1]
+                dst = os.path.join(vdir, p["name"] + ext)
+                try:
+                    join_copy(parts, dst)
+                except Exception as e:
+                    warnings.append(f"Shot {s.index} {s.name}: couldn't join head/body/tail ({e}); "
+                                    "the clip has no handles.")
+                    body = files[p["jobs"][1 if p["pre"] else 0]]
+                    shutil.copy2(body, dst)
+                    p["pre"] = p["post"] = 0
             vc = Clip(name=s.name, start=rt.sec(s.start), duration=sec(s.end - s.start), source_path=dst,
-                      source_in=sec(pre))
+                      source_in=sec(p["pre"]))
             vc.wav_path = dst
             per_track.setdefault(s.item.track_index, []).append(vc)
             shot_records.append({
-                "index": s.index, "name": s.name, "track": track_name,
+                "index": s.index, "name": s.name, "track": p["track"],
                 "start": sc._f(rt.sec(s.start)), "duration": sc._f(sec(s.end - s.start)),
                 "source": s.item.file, "source_in": sc._f(s.source_in) if s.item.file else "0/1",
                 "source_tc": shot_tc(rt, s), "speed": sc._f(Fraction(s.item.speed)),
                 "resolve_item": s.item.uid, "overlays": [o.name for o in s.overlays],
-                "handles": kind, "head": sc._f(sec(pre)), "tail": sc._f(sec(post)),
+                "handles": p["kind"], "head": sc._f(sec(p["pre"])), "tail": sc._f(sec(p["post"])),
                 "live_file": os.path.abspath(dst)})
+        shutil.rmtree(pdir, ignore_errors=True)
         for idx in sorted(per_track, reverse=True):          # V2 above V1, like Resolve
             clips = per_track[idx]
             for k, c in enumerate(clips):
@@ -617,24 +706,12 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
             b.add_track(rt.video_tracks.get(idx, f"V{idx}"), clips, offset, LIVE_COLORS["VIDEO"], warnings,
                         volume_db=level)
 
-        if opt.mix_track:
-            try:
-                from .media import tool, _run
-                mix = os.path.join(project_dir, "Samples", "Imported", f"{tag}_stereo mix.wav")
-                os.makedirs(os.path.dirname(mix), exist_ok=True)
-                r = _run([tool("ffmpeg"), "-y", "-v", "error", "-i", full, "-vn", "-ac", "2",
-                          "-ar", str(opt.sample_rate), "-c:a", "pcm_s24le", mix])
-                if r.returncode != 0:
-                    raise RuntimeError(r.stderr.strip()[-300:])
-                mc = Clip(name="Stereo mix", start=rt.sec(full0), duration=rt.sec(rt.end - full0),
-                          source_path=mix, source_in=Fraction(0))
-                mc.wav_path = mix
-                b.add_track("STEREO MIX", [mc], offset, LIVE_COLORS["PICTURE"], warnings, volume_db=level)
-            except Exception as e:
-                warnings.append(f"Stereo mix track not made: {e}")
-
-        if not opt.keep_renders:
-            shutil.rmtree(rdir, ignore_errors=True)
+        if mix_job and mix_job in files:
+            mix = files[mix_job]
+            mc = Clip(name="Stereo mix", start=rt.sec(rt.start), duration=rt.sec(rt.end - rt.start),
+                      source_path=mix, source_in=Fraction(0))
+            mc.wav_path = mix
+            b.add_track("STEREO MIX", [mc], offset, LIVE_COLORS["PICTURE"], warnings, volume_db=level)
     elif opt.video:
         warnings.append("No video clips on the Resolve timeline, so no picture was made.")
 

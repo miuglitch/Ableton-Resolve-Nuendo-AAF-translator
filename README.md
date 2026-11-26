@@ -47,10 +47,14 @@ Preferences → System → General → *External scripting using* = **Local**.
 Picture: footage clips decide the cuts. A title over a cut is split there and goes
 with the shot underneath. One Live clip per shot, on a track named like the Resolve
 video track, with a locator at each shot and the timeline's stereo mix as its sound.
-*Full timeline* renders once and cuts it up (handles = neighbouring edit).
-*Per shot, real source handles* also renders a temporary timeline where each shot is
-extended with its own footage (grade, Fusion comps and Inspector transforms copied;
-deleted afterwards). Titles appear inside the cut, handles are clean footage.
+Resolve renders every Live clip itself, straight in the format chosen in the
+tab (codec, resolution, frame rate); nothing is transcoded. Key frame interval
+can't be set through Resolve's scripting: use ProRes/DNxHR (every frame) or name
+a Resolve render preset. *Handles from the edit*: one render per shot with the
+handles from the neighbouring edit. *Real source handles*: head and tail are
+rendered from a temporary timeline where each shot is extended with its own
+footage (grade, Fusion comps and Inspector transforms copied; deleted afterwards),
+the shot itself from your edit (titles included), joined without re-encoding.
 
 Audio: one Live track per Resolve audio track (same name), clips cut with head/tail
 handles or whole files, optional normalising (as clip gain), clip gain/fades/volume
