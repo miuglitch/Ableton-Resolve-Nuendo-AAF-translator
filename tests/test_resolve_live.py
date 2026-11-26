@@ -284,8 +284,9 @@ def test_h264_preset_imported(env, monkeypatch):
     assert called == [] and not res.warnings
 
 
-def test_h264_fallback_converts(env):
+def test_h264_fallback_converts(env, monkeypatch):
     """No preset available: ProRes from Resolve, converted to every-frame H.264."""
+    monkeypatch.setattr(resolve_live, "preset_file", lambda: None)
     rv, rt, res = _run(env, resolve_live.MODE_HANDLES, "h264fallback", audio=False)
     assert any("ProRes Proxy" in w for w in res.warnings)
     side = json.load(open(res.als_path[:-4] + ".bridge.json"))
@@ -295,3 +296,19 @@ def test_h264_fallback_converts(env):
                           "-of", "csv=p=0", f], capture_output=True, text=True).stdout.split()
     assert out and all(k.startswith("1") for k in out)        # every frame is a key frame
     assert near(pixel(f, 0.5), fr.color_of("snow", dim=True))
+
+
+def test_preset_render_fails_falls_back(env, monkeypatch):
+    """The shipped preset uses an NVIDIA encoder: on a machine without one the
+    render fails, and the app falls back to ProRes Proxy → H.264 every frame."""
+    monkeypatch.setattr(fr.Project, "no_gpu", True)
+    rv, rt, res = _run(env, resolve_live.MODE_FULL, "nogpu", audio=False)
+    assert any("graphics-card" in w for w in res.warnings)
+    side = json.load(open(res.als_path[:-4] + ".bridge.json"))
+    assert all(os.path.exists(s["live_file"]) and s["live_file"].endswith(".mp4") for s in side["shots"])
+    assert rv.project.jobs == {}
+
+
+def test_shipped_preset_is_every_frame():
+    path = resolve_live.preset_file()
+    assert path and "<DbKey>h264_iframefreq</DbKey>" in open(path).read()

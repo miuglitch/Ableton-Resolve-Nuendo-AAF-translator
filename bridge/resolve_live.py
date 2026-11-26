@@ -362,6 +362,12 @@ def audio_format(project) -> tuple[str, str]:
 
 
 LIVE_PRESET = "MIUGLITCH Live H264"
+PRESET_NAMES = ("ableton video", "miuglitch live h264")      # accepted as the app's preset
+
+
+def fps_label(fps: Fraction) -> str:
+    """Resolve's frame rate text: 25, 23.976, 29.97…"""
+    return f"{float(fps):.3f}".rstrip("0").rstrip(".")
 
 
 def preset_file() -> str | None:
@@ -380,8 +386,9 @@ def ensure_live_preset(resolve, project, log) -> str | None:
         except Exception:
             return []
     have = names()
-    if LIVE_PRESET in have:
-        return LIVE_PRESET
+    for n in have:
+        if n.strip().lower() in PRESET_NAMES:
+            return n
     path = preset_file()
     if not path:
         return None
@@ -398,9 +405,10 @@ def ensure_live_preset(resolve, project, log) -> str | None:
             break
     after = names()
     new = [n for n in after if n not in have]
-    if LIVE_PRESET in after:
-        log(f"Added the render preset '{LIVE_PRESET}' to Resolve")
-        return LIVE_PRESET
+    for n in after:
+        if n.strip().lower() in PRESET_NAMES:
+            log(f"Added the render preset '{n}' to Resolve")
+            return n
     if new:
         log(f"Added the render preset '{new[0]}' to Resolve")
         return new[0]
@@ -679,70 +687,88 @@ def run(resolve, rt: ResolveTimeline, opt: Options) -> Result:
                 warnings.append("Resolve's H.264 key-frame preset couldn't be loaded, so Resolve rendered "
                                 "ProRes Proxy and the app converted each clip to H.264 with a key frame "
                                 "on every frame.")
-        if convert_to:
+        attempts = [(preset, convert_to)]
+        if preset and not opt.render_preset:          # app's preset failing → safety net
+            attempts.append((None, vs.codec))
+        for attempt, (preset, convert_to) in enumerate(attempts):
+            if attempt:
+                for w in ("_parts",):
+                    shutil.rmtree(os.path.join(project_dir, "Samples", "Video", w), ignore_errors=True)
+            rate_ = rate or (fps_label(fps) if preset else None)
             try:
-                fmt, codec = resolve_format(rt.project_obj, "ProRes 422 Proxy (.mov)")
-            except ResolveError:
-                fmt, codec = resolve_format(rt.project_obj, "DNxHR LB (.mov)")
-        else:
-            fmt, codec = resolve_format(rt.project_obj, vs.codec)
-        vdir = os.path.join(project_dir, "Samples", "Video")
-        pdir = os.path.join(vdir, "_parts")
-        head = int(round(Fraction(str(max(0.0, opt.video_head))) * fps))
-        tail = int(round(Fraction(str(max(0.0, opt.video_tail))) * fps))
-        log(f"{len(shots)} shots · Resolve renders {vs.codec} {size[0]}x{size[1]}"
-            + (f" via preset '{preset}'" if preset else "")
-            + f" · handles {opt.video_head:g}s / {opt.video_tail:g}s · "
-            + ("real source handles" if opt.render_mode == MODE_HANDLES else "handles from the edit"))
-        tag = _safe(rt.name)[:40]
-        sec = lambda fr: Fraction(fr) / fps          # noqa: E731
-        plan = {}                                    # shot index -> dict
-        with Renderer(resolve, rt, fmt, codec, log, lambda f, t="": say(0.05 + 0.6 * f, t),
-                      preset=preset, frame_rate=rate) as R:
-            htl, placed = None, {}
-            if opt.render_mode == MODE_HANDLES:
-                try:
-                    log("Building the temporary handles timeline in Resolve…")
-                    htl, placed = build_handles_timeline(resolve, rt, shots, head, tail, log)
-                except ResolveError as e:
-                    warnings.append(f"Real handles not possible ({e}); handles come from the edit.")
-                    placed = {}
-            try:
-                for s in shots:
-                    track_name = rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}")
-                    nm = f"{_safe(track_name)}_{s.index:03d}_{_safe(s.name)[:50]}"
-                    p = {"track": track_name, "name": nm}
-                    if s.index in placed:
-                        body, pre, post = placed[s.index]
-                        L = s.end - s.start
-                        p.update(kind="source", pre=pre, post=post, jobs=[])
-                        if pre:
-                            p["jobs"].append(R.queue(htl, pdir, nm + "_head", body - pre, body, size))
-                        p["jobs"].append(R.queue(rt.obj, pdir, nm + "_body", s.start, s.end, size))
-                        if post:
-                            p["jobs"].append(R.queue(htl, pdir, nm + "_tail", body + L, body + L + post, size))
-                    else:
-                        a, e = max(rt.start, s.start - head), min(rt.end, s.end + tail)
-                        p.update(kind="edit", pre=s.start - a, post=e - s.end,
-                                 jobs=[R.queue(rt.obj, pdir if convert_to else vdir, nm, a, e, size)])
-                    plan[s.index] = p
-                mix_job = None
-                if opt.mix_track:
+                if convert_to:
                     try:
-                        mix_job = R.queue(rt.obj, os.path.join(project_dir, "Samples", "Imported"),
-                                          f"{tag}_stereo mix", rt.start, rt.end, video=False,
-                                          fmt=audio_format(rt.project_obj))
-                    except Exception as e:
-                        warnings.append(f"Stereo mix track not made: {e}")
-                log(f"Resolve is rendering {len(R.jobs)} clip{'s' if len(R.jobs) != 1 else ''}…")
-                files = R.render(list(R.jobs))
-            finally:
-                if htl is not None:
+                        fmt, codec = resolve_format(rt.project_obj, "ProRes 422 Proxy (.mov)")
+                    except ResolveError:
+                        fmt, codec = resolve_format(rt.project_obj, "DNxHR LB (.mov)")
+                else:
+                    fmt, codec = resolve_format(rt.project_obj, vs.codec)
+                vdir = os.path.join(project_dir, "Samples", "Video")
+                pdir = os.path.join(vdir, "_parts")
+                head = int(round(Fraction(str(max(0.0, opt.video_head))) * fps))
+                tail = int(round(Fraction(str(max(0.0, opt.video_tail))) * fps))
+                log(f"{len(shots)} shots · Resolve renders {vs.codec} {size[0]}x{size[1]}"
+                    + (f" via preset '{preset}'" if preset else "")
+                    + f" · handles {opt.video_head:g}s / {opt.video_tail:g}s · "
+                    + ("real source handles" if opt.render_mode == MODE_HANDLES else "handles from the edit"))
+                tag = _safe(rt.name)[:40]
+                sec = lambda fr: Fraction(fr) / fps          # noqa: E731
+                plan = {}                                    # shot index -> dict
+                with Renderer(resolve, rt, fmt, codec, log, lambda f, t="": say(0.05 + 0.6 * f, t),
+                              preset=preset, frame_rate=rate_) as R:
+                    htl, placed = None, {}
+                    if opt.render_mode == MODE_HANDLES:
+                        try:
+                            log("Building the temporary handles timeline in Resolve…")
+                            htl, placed = build_handles_timeline(resolve, rt, shots, head, tail, log)
+                        except ResolveError as e:
+                            warnings.append(f"Real handles not possible ({e}); handles come from the edit.")
+                            placed = {}
                     try:
-                        rt.project_obj.SetCurrentTimeline(rt.obj)
-                        rt.project_obj.GetMediaPool().DeleteTimelines([htl])
-                    except Exception:
-                        pass
+                        for s in shots:
+                            track_name = rt.video_tracks.get(s.item.track_index, f"V{s.item.track_index}")
+                            nm = f"{_safe(track_name)}_{s.index:03d}_{_safe(s.name)[:50]}"
+                            p = {"track": track_name, "name": nm}
+                            if s.index in placed:
+                                body, pre, post = placed[s.index]
+                                L = s.end - s.start
+                                p.update(kind="source", pre=pre, post=post, jobs=[])
+                                if pre:
+                                    p["jobs"].append(R.queue(htl, pdir, nm + "_head", body - pre, body, size))
+                                p["jobs"].append(R.queue(rt.obj, pdir, nm + "_body", s.start, s.end, size))
+                                if post:
+                                    p["jobs"].append(R.queue(htl, pdir, nm + "_tail", body + L, body + L + post, size))
+                            else:
+                                a, e = max(rt.start, s.start - head), min(rt.end, s.end + tail)
+                                p.update(kind="edit", pre=s.start - a, post=e - s.end,
+                                         jobs=[R.queue(rt.obj, pdir if convert_to else vdir, nm, a, e, size)])
+                            plan[s.index] = p
+                        mix_job = None
+                        if opt.mix_track:
+                            try:
+                                mix_job = R.queue(rt.obj, os.path.join(project_dir, "Samples", "Imported"),
+                                                  f"{tag}_stereo mix", rt.start, rt.end, video=False,
+                                                  fmt=audio_format(rt.project_obj))
+                            except Exception as e:
+                                warnings.append(f"Stereo mix track not made: {e}")
+                        log(f"Resolve is rendering {len(R.jobs)} clip{'s' if len(R.jobs) != 1 else ''}…")
+                        files = R.render(list(R.jobs))
+                    finally:
+                        if htl is not None:
+                            try:
+                                rt.project_obj.SetCurrentTimeline(rt.obj)
+                                rt.project_obj.GetMediaPool().DeleteTimelines([htl])
+                            except Exception:
+                                pass
+                break
+            except ResolveError as e:
+                if attempt == len(attempts) - 1:
+                    raise
+                warnings.append(f"Resolve couldn't render with the preset '{preset}' ({e}). Resolve rendered "
+                                "ProRes Proxy instead and the app converted each clip to H.264 with a key "
+                                "frame on every frame (the preset may use a graphics-card encoder this "
+                                "computer doesn't have).")
+                log("! Preset render failed, rendering ProRes Proxy and converting instead…")
 
         per_track: dict[int, list[Clip]] = {}
         for n, s in enumerate(shots):

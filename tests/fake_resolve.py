@@ -165,8 +165,10 @@ class Project:
     def LoadRenderPreset(self, name):
         if name not in self.presets:
             return False
-        self.fmt = {"format": "mp4", "codec": "H264"}
+        self.fmt = {"format": "mp4", "codec": "H264_NVENC" if self.no_gpu else "H264"}
         return True
+
+    no_gpu = False
     def GetCurrentRenderFormatAndCodec(self): return dict(self.fmt)
 
     def SetCurrentRenderFormatAndCodec(self, f, c):
@@ -195,12 +197,15 @@ class Project:
 
     def StartRendering(self, jobs, interactive=False):
         for j in jobs:
-            _render(self.jobs[j])
+            if self.jobs[j]["fmt"]["codec"] != "H264_NVENC":
+                _render(self.jobs[j])
         return True
 
     def IsRenderingInProgress(self): return False
 
     def GetRenderJobStatus(self, j):
+        if self.jobs.get(j, {}).get("fmt", {}).get("codec") == "H264_NVENC":
+            return {"JobStatus": "Failed", "Error": "No NVIDIA GPU", "CompletionPercentage": 0}
         return {"JobStatus": "Complete", "CompletionPercentage": 100}
 
     def GetRenderJobList(self):
